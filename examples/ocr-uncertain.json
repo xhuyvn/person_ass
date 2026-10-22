@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "images": [
+    {
+      "attachment_id": "attachment-fixture-001",
+      "status": "partial",
+      "transcription": "Lịch khám: [12/11 hoặc 17/11] lúc 09:00",
+      "blocks": [
+        {
+          "text": "Lịch khám: [12/11 hoặc 17/11] lúc 09:00",
+          "kind": "paragraph",
+          "uncertain": true
+        }
+      ],
+      "uncertainties": [
+        {
+          "fragment": "12/11 hoặc 17/11",
+          "reason": "Chữ số thứ hai bị mờ",
+          "alternatives": [
+            "12/11",
+            "17/11"
+          ]
+        }
+      ]
+    }
+  ]
+}

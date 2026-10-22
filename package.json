@@ -1,0 +1,27 @@
+{
+  "name": "personalass",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build:server": "npm run build --workspace apps/server",
+    "build:web": "npm run build:web --workspace apps/client",
+    "migrate": "npm run migrate --workspace apps/server",
+    "test": "npm run test --workspaces --if-present",
+    "postinstall": "npm run build --workspace packages/contracts && npm run build --workspace packages/ui"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

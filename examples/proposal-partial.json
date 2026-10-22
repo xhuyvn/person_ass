@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "source_revision_id": "revision-fixture-001",
+  "actions": [
+    {
+      "action_id": "a1",
+      "operation": "create",
+      "entity_type": "task",
+      "target_id": null,
+      "expected_version": null,
+      "fields": {
+        "title": "Mua sữa",
+        "status": "open",
+        "due_date": null,
+        "due_at": null
+      },
+      "evidence": [
+        {
+          "source_id": "revision-fixture-001",
+          "quote": "Mua sữa"
+        }
+      ],
+      "ambiguity": [],
+      "depends_on": []
+    },
+    {
+      "action_id": "a2",
+      "operation": "create",
+      "entity_type": "appointment",
+      "target_id": null,
+      "expected_version": null,
+      "fields": {
+        "title": "Khám",
+        "starts_at": null
+      },
+      "evidence": [
+        {
+          "source_id": "revision-fixture-001",
+          "quote": "Hẹn khám ngày 12"
+        }
+      ],
+      "ambiguity": [
+        {
+          "field_path": "starts_at",
+          "reason": "missing_month_year",
+          "question": "Bạn muốn hẹn khám ngày 12 tháng nào, năm nào?"
+        }
+      ],
+      "depends_on": []
+    }
+  ]
+}

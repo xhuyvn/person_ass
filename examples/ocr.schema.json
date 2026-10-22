@@ -1,0 +1,101 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "images"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attachment_id",
+          "status",
+          "transcription",
+          "blocks",
+          "uncertainties"
+        ],
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "readable",
+              "partial",
+              "unreadable"
+            ]
+          },
+          "transcription": {
+            "type": "string"
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text",
+                "kind",
+                "uncertain"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "paragraph",
+                    "table",
+                    "heading",
+                    "other"
+                  ]
+                },
+                "uncertain": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "uncertainties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fragment",
+                "reason",
+                "alternatives"
+              ],
+              "properties": {
+                "fragment": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "alternatives": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 10
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PersonalAss OCR v1"
+}

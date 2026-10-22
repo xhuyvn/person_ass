@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "PersonalAss",
+    "slug": "personalass",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "personalass",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {},
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}

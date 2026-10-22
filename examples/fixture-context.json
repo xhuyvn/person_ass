@@ -1,0 +1,15 @@
+{
+  "captured_at": "2026-10-21T08:00:00+07:00",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "source_revision_id": "revision-fixture-001",
+  "text": "Mua sữa. Hẹn khám ngày 12",
+  "expected": {
+    "auto_apply_action_ids": [
+      "a1"
+    ],
+    "clarify_action_ids": [
+      "a2"
+    ],
+    "official_appointments_created": 0
+  }
+}
