@@ -18,7 +18,7 @@ const CLIENT_ROOT = path.resolve(
 );
 const ROUTE_DIR = path.join(CLIENT_ROOT, "app");
 
-const ALLOWED_ROUTE_FILES = ["_layout.tsx", "about.tsx", "index.tsx"];
+const ALLOWED_ROUTE_FILES = ["_layout.tsx", "about.tsx", "index.tsx", "status.tsx"];
 
 describe("expo-router route directory", () => {
   it("contains only route files", () => {

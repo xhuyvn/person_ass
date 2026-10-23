@@ -7,6 +7,7 @@ import {
 } from "./config.js";
 import { findMigrationsDir, runMigrations } from "./db/migrate.js";
 import { closeDatabase, openDatabase, type Db } from "./db/open.js";
+import { startScheduler } from "./domain/scheduler.js";
 import { createLogger } from "./logger.js";
 import { appVersion } from "./version.js";
 
@@ -31,10 +32,13 @@ async function main(): Promise<void> {
       version: migration.version,
     });
 
-    const app = await buildApp({ config, paths, db, migrationsDir, logger });
+    const clock = () => new Date();
+    const app = await buildApp({ config, paths, db, migrationsDir, logger, clock });
+    const stopScheduler = startScheduler({ db, clock }, logger);
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info("shutdown_started", { signal });
+      stopScheduler();
       try {
         await app.close();
       } catch (err) {

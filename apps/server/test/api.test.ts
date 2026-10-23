@@ -190,7 +190,7 @@ describe("GET /health/ready", () => {
     const body = healthReadySchema.parse(response.json());
     expect(body.status).toBe("ok");
     expect(body.checks.database.ok).toBe(true);
-    expect(body.checks.database.migrations_applied).toBe(2);
+    expect(body.checks.database.migrations_applied).toBe(3);
     expect(body.checks.data_dir.ok).toBe(true);
   });
 
