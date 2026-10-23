@@ -40,12 +40,12 @@ function countRows(table: string): number {
 }
 
 describe("runMigrations", () => {
-  it("applies both migrations on a fresh database", () => {
+  it("applies all migrations on a fresh database", () => {
     const result = runMigrations(db, MIGRATIONS_DIR);
 
-    expect(result.applied).toBe(2);
-    expect(result.version).toBe(2);
-    expect(appliedVersions(db)).toEqual([1, 2]);
+    expect(result.applied).toBe(3);
+    expect(result.version).toBe(3);
+    expect(appliedVersions(db)).toEqual([1, 2, 3]);
   });
 
   it("is idempotent when run again", () => {
@@ -53,8 +53,8 @@ describe("runMigrations", () => {
     const second = runMigrations(db, MIGRATIONS_DIR);
 
     expect(second.applied).toBe(0);
-    expect(second.skipped).toBe(2);
-    expect(countRows("schema_migrations")).toBe(2);
+    expect(second.skipped).toBe(3);
+    expect(countRows("schema_migrations")).toBe(3);
   });
 
   it("preserves user data across re-runs", () => {
@@ -90,7 +90,7 @@ describe("runMigrations", () => {
       .prepare("SELECT applied_at FROM schema_migrations")
       .all() as { applied_at: string }[];
 
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     for (const row of rows) {
       expect(row.applied_at).toMatch(
         /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,

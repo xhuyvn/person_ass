@@ -1,11 +1,13 @@
 # Trạng thái triển khai
 
-Ngày bàn giao thiết kế: 21/10/2026. M0 triển khai xong ngày 22/10/2026.
+Ngày bàn giao thiết kế: 21/10/2026. M0 triển khai xong ngày 22/10/2026. M1 bắt đầu 23/10/2026.
+
+> Rà soát M0 (23/10/2026): `npm ci` sạch, typecheck PASS, test PASS (số test thực tế cao hơn con số 57 ghi bên dưới: contracts 24, server 60→86 sau M1, client 10). Mục 5.9 "chưa là git repository" đã lỗi thời. Chưa chạy lại E2E trình duyệt và `start-local.ps1` trong lần rà soát này.
 
 | Mốc | Trạng thái | Bằng chứng |
 | --- | --- | --- |
 | M0 Nền | **Đã làm, đã kiểm tra** | 57 test vitest pass; typecheck/build server/build web pass; migrate idempotent; web gọi health thật qua trình duyệt |
-| M1 Manual slice | Chưa bắt đầu | — |
+| M1 Manual slice | **Đã làm, đã kiểm tra (web)** | 126 test pass (contracts 24, server 86, client 16); E2E trình duyệt: memo → việc có nguồn → lịch hẹn → nhắc thật → restart backend → nhắc còn → ack/hoàn thành |
 | M2–M6 | Chưa bắt đầu | — |
 
 Coder cập nhật file này sau mỗi milestone. Giữ test/benchmark chưa chạy ở trạng thái chưa xác minh.
@@ -88,3 +90,53 @@ Tất cả dependency trong `package.json` của từng workspace được pin *
 ### 7. Bước tiếp theo (M1 — Manual slice)
 
 Chưa bắt đầu. Theo docs/07, M1 cần: tạo memo → task → reminder → notification trong app; restart xong nhắc vẫn còn; idempotency/version pass. Cần thêm các bảng còn thiếu (`notes`, `notifications`, `delivery_attempts`, `occurrences`, `attachments`, `jobs`, `recurrence_series`, …) bằng migration mới (chỉ ADDITIVE), các route `/api/v1/*` theo docs/03 §4, và sinh OpenAPI từ Zod.
+
+
+---
+
+## M1 — Manual slice (23/10/2026)
+
+### Đã làm
+- Migration `0003_m1_manual.sql` (additive): `notes`, `occurrences`, `notifications`, `delivery_attempts`. Schema version = 3.
+- Contracts Zod (`packages/contracts/src/m1.ts`) dùng chung cho validate runtime và OpenAPI.
+- API `/api/v1`: memos (POST/GET, `client_request_id` UNIQUE suốt vòng đời), tasks (CRUD + complete/reopen), notes, appointments, reminder-rules, notifications (list/ack/snooze), `POST /entities/:type/:id/archive` (cần `confirm:true`), `GET /api/v1/openapi.json` (OpenAPI 3.1 sinh từ Zod).
+- `Idempotency-Key` + request_hash (khác body → 409); PATCH/complete/archive dùng `expected_version` trong `WHERE ... AND version=?` (409 khi lệch).
+- Nhắc mặc định (docs/00 B): hạn ngày → 09:00 local cùng ngày; lịch có giờ → trước 30 phút; task không hạn → không có nhắc. Sửa hạn/giờ tăng `schedule_revision`, hủy occurrence cũ và tạo mới trong cùng transaction; complete/archive/cancel hủy nhắc tương lai.
+- Scheduler (tick 15 s, chạy ngay lúc khởi động): claim + tạo notification + đổi trạng thái occurrence trong một transaction; UNIQUE(occurrence_id, channel); trễ > 10 phút → gom một digest, occurrence đánh `missed`, không xóa. Clock được inject.
+- Source link thủ công (memo revision + quote) và audit event cho mọi thay đổi.
+
+### Lệnh kiểm tra
+| Lệnh | Kết quả |
+| --- | --- |
+| `npm ci` | OK |
+| `npm run typecheck` | PASS |
+| `npm test` | PASS — contracts 24, server 86 (có 26 test M1 mới), client 10 |
+| `npm run build:server` | PASS |
+
+Acceptance đã có test tự động: A01, A02 (nhắc 08:30), A07, A13 (digest), A16 mức M1 (complete lặp), A18, A26/restart (notification còn sau khi mở lại DB), A31. Test trước đây giả định đúng 2 migration đã cập nhật lên 3.
+
+### UI web (apps/client)
+- Màn chính `/` (`src/components/Home.tsx`): ghi nhanh memo, việc (thêm/xong/mở lại, tùy chọn gắn nguồn từ memo vừa lưu), lịch hẹn, ghi chú, danh sách thông báo (Đã xem / Hoãn 30 phút), poll thông báo mỗi 15 s, banner khi mất kết nối. Màn trạng thái cũ chuyển sang `/status`.
+- `src/lib/api.ts`: client có kiểm tra response bằng Zod, `Idempotency-Key` cho thao tác tạo, memo dùng `client_request_id` giữ nguyên khi retry. `src/lib/format.ts`: ngày dd/mm/yyyy, múi giờ Asia/Ho_Chi_Minh (offset +07:00 cố định).
+- Lưu ý kỹ thuật: Metro không resolve được `./m1.js` nên schema M1 nằm trong `packages/contracts/src/index.ts` (không tách file có đuôi `.js`).
+
+### E2E trình duyệt (build web tĩnh :4300 + backend build :4310, DB mới)
+| Bước | Kết quả |
+| --- | --- |
+| Tạo lịch hẹn 15:54 qua form | Hiện trong danh sách; scheduler tạo thông báo lúc 15:24 (đúng -30 phút), trong ~11 s sau giờ hẹn nhắc |
+| Lưu memo, tạo việc hạn 24/10 gắn nguồn | `GET /memos` trả `sources` trỏ đúng task + quote |
+| Dừng và chạy lại backend (`migrations_applied: 0`) | Reload trang: thông báo vẫn còn, không bị tạo lại |
+| Bấm "Đã xem", "Xong" | Thông báo chuyển "đã xem", việc "đã xong"; 0 lỗi ứng dụng |
+| Console | Chỉ một `ERR_CONNECTION_REFUSED` do poll trong lúc backend đang tắt (đúng kỳ vọng) |
+
+### Chưa làm / hạn chế
+1. Chưa kiểm thử bằng trình duyệt: Hoãn 30 phút, banner offline, tạo ghi chú, mở lại việc, giao diện dark/mobile (các luồng này chỉ có test tự động ở API hoặc chưa có).
+2. Chưa chạy `scripts\start-local.ps1` với M1; E2E dùng lệnh `node` trực tiếp.
+3. Form lịch hẹn nhập giờ dạng chữ `yyyy-mm-dd hh:mm`; chưa có date picker, chưa hỗ trợ lịch cả ngày trên UI (API có).
+4. Chưa làm: recurrence, attachments/jobs (M2–M3), `GET /today`, `/timeline`, `/search`, `/audit-events`, `GET/PATCH /settings`, action-groups/undo, `POST /memos/:id/revisions`, sửa/archive từ UI.
+5. `memos.current_revision_id` chưa có FK; chưa có integrity scan cho link đa hình.
+6. Chưa có thông báo OS của trình duyệt.
+7. Mọi thay đổi chưa commit.
+
+### Bước tiếp theo
+Dọn các hạn chế 1–3 nếu muốn đóng M1 chặt hơn, rồi sang M2 (AI text: connections, adapters, proposals/policy).

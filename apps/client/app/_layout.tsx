@@ -19,7 +19,8 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: theme.colors.background },
         }}
       >
-        <Stack.Screen name="index" options={{ title: "Trạng thái" }} />
+        <Stack.Screen name="index" options={{ title: "PersonalAss" }} />
+        <Stack.Screen name="status" options={{ title: "Trạng thái" }} />
         <Stack.Screen name="about" options={{ title: "Giới thiệu" }} />
       </Stack>
     </>

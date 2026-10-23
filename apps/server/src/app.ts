@@ -8,6 +8,9 @@ import type { Config, DataPaths } from "./config.js";
 import { isAllowedHost } from "./config.js";
 import type { Db } from "./db/open.js";
 import { registerHealthRoutes } from "./api/health.js";
+import { buildOpenApi, registerV1Routes } from "./api/v1.js";
+import type { Clock } from "./domain/core.js";
+import { appVersion } from "./version.js";
 import { createLogger, type Logger } from "./logger.js";
 
 const CORRELATION_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -18,6 +21,8 @@ export type AppDeps = {
   db: Db;
   migrationsDir: string;
   logger?: Logger;
+  /** Injectable for deterministic tests (docs/05 §6). */
+  clock?: Clock;
 };
 
 export function resolveCorrelationId(request: FastifyRequest): string {
@@ -173,6 +178,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       message?: string;
       statusCode?: number;
       validation?: Array<{ field?: string; message?: string }>;
+      fieldErrors?: Record<string, string>;
     };
 
     const { status: statusCode, code } = resolveErrorOutcome(error);
@@ -182,7 +188,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         ? "Internal server error"
         : err.message || "Request failed";
 
-    const fieldErrors: Record<string, string> = {};
+    const fieldErrors: Record<string, string> = { ...(err.fieldErrors ?? {}) };
     const details = err.validation;
     if (Array.isArray(details)) {
       for (const detail of details) {
@@ -216,6 +222,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     paths: deps.paths,
     migrationsDir: deps.migrationsDir,
   });
+
+  const ops = await registerV1Routes(app, {
+    db: deps.db,
+    clock: deps.clock ?? (() => new Date()),
+  });
+  const openapi = buildOpenApi(ops, appVersion());
+  app.get("/api/v1/openapi.json", async () => openapi);
 
   return app;
 }

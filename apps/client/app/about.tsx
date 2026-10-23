@@ -20,7 +20,7 @@ export default function AboutScreen() {
         Trợ lý quản lý ghi nhớ, việc nhà, lịch khám và các dự án cá nhân.
       </Text>
       <Text style={[styles.body, { color: theme.colors.textMuted }]}>
-        Phiên bản: {APP_VERSION} (mốc M0)
+        Phiên bản: {APP_VERSION} (mốc M1)
       </Text>
 
       <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
