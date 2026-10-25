@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENTS_PER_MEMO } from "@personalass/contracts";
 import type { ListQuery, MemoCreate, MemoDetail, MemoReceipt } from "@personalass/contracts";
 import {
   DomainError,
@@ -15,13 +16,18 @@ import {
 import { assertValidTimeZone } from "./time.js";
 import { enqueueMemoJob, latestJobForRevision } from "../jobs/worker.js";
 import { memoAiState } from "./proposals.js";
+import { attachmentsOfRevision, bindAttachments, effectiveOcrRun } from "../storage/attachments.js";
 
 /**
  * Save a memo as raw text + revision 1. `client_request_id` is unique per
  * owner for the memo's whole life (docs/03 §5, A07): a repeat returns the
  * same receipt and creates nothing. No AI job exists in M1 (job_id = null).
  */
-export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt; created: boolean } {
+export function createMemo(
+  ctx: Ctx,
+  input: MemoCreate,
+  opts: { maxImages?: number } = {},
+): { receipt: MemoReceipt; created: boolean } {
   if (!assertValidTimeZone(input.timezone)) {
     throw new DomainError("BAD_REQUEST", "Dữ liệu không hợp lệ.", { timezone: "Múi giờ IANA không hợp lệ." });
   }
@@ -41,6 +47,14 @@ export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt;
     };
   }
 
+  const maxImages = opts.maxImages ?? MAX_ATTACHMENTS_PER_MEMO;
+  if (input.attachment_tokens.length > maxImages) {
+    throw new DomainError("BAD_REQUEST", "Dữ liệu không hợp lệ.", {
+      attachment_tokens: `Tối đa ${maxImages} ảnh cho mỗi memo.`,
+    });
+  }
+  const inputKind = input.attachment_tokens.length === 0 ? "text" : input.text.length === 0 ? "image" : "mixed";
+
   const memoId = newId();
   const revisionId = newId();
   const now = nowIso(ctx);
@@ -53,14 +67,21 @@ export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt;
   ctx.db
     .prepare(
       `INSERT INTO memo_revisions (id, memo_id, revision_no, raw_text, captured_at, timezone, input_kind,
-         created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, 'text', ?, ?)`,
+         created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(revisionId, memoId, input.text, input.captured_at, input.timezone, now, now);
+    .run(revisionId, memoId, input.text, input.captured_at, input.timezone, inputKind, now, now);
+  const attachmentIds = bindAttachments(ctx, revisionId, input.attachment_tokens);
   writeAudit(ctx, {
     action: "memo.create",
     entityType: "memo",
     entityId: memoId,
-    after: { revision_id: revisionId, input_kind: "text", privacy: input.privacy },
+    after: {
+      revision_id: revisionId,
+      input_kind: inputKind,
+      privacy: input.privacy,
+      attachment_count: attachmentIds.length,
+      attachment_ids: attachmentIds,
+    },
   });
   // The memo is durable before any AI work; the job is created in the same
   // transaction so a crash can never leave a memo without its job (docs/02 §3).
@@ -81,7 +102,7 @@ export function getMemo(ctx: Ctx, id: string): MemoDetail {
     .get(String(memo.current_revision_id)) as Row | undefined;
   const sources = ctx.db
     .prepare(
-      `SELECT sl.entity_type, sl.entity_id, sl.memo_revision_id, sl.quote
+      `SELECT sl.entity_type, sl.entity_id, sl.memo_revision_id, sl.quote, sl.attachment_id, sl.ocr_run_id
        FROM source_links sl JOIN memo_revisions r ON r.id = sl.memo_revision_id
        WHERE r.memo_id = ? AND sl.owner_id = ? ORDER BY sl.created_at`,
     )
@@ -108,7 +129,21 @@ export function getMemo(ctx: Ctx, id: string): MemoDetail {
       entity_id: String(r.entity_id),
       memo_revision_id: (r.memo_revision_id as string | null) ?? null,
       quote: (r.quote as string | null) ?? null,
+      attachment_id: (r.attachment_id as string | null) ?? null,
+      ocr_run_id: (r.ocr_run_id as string | null) ?? null,
     })),
+    attachments: memo.current_revision_id
+      ? attachmentsOfRevision(ctx, String(memo.current_revision_id)).map((a) => ({
+          id: a.id,
+          position: Number(a.position),
+          mime: a.mime as MemoDetail["attachments"][number]["mime"],
+          bytes: a.bytes,
+          width: a.width,
+          height: a.height,
+          content_path: `/api/v1/attachments/${a.id}/content`,
+          ocr: effectiveOcrRun(ctx, a.id),
+        }))
+      : [],
     privacy: (memo.privacy as MemoDetail["privacy"]) ?? "default",
     job: memo.current_revision_id ? latestJobForRevision(ctx, String(memo.current_revision_id)) : null,
     ...memoAiState(ctx, id),

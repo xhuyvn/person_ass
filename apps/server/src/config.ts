@@ -30,6 +30,14 @@ export const envSchema = z.object({
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(1),
   SCHEDULER_TICK_SECONDS: z.coerce.number().int().min(1).default(15),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(10 * 1024 * 1024),
+  /** Images per memo (docs/01 §3); never above the contract maximum of 10. */
+  MAX_IMAGES_PER_MEMO: z.coerce.number().int().min(1).max(10).default(10),
+  /** Decoded pixel budget per image; larger images are refused (decompression bomb guard). */
+  MAX_IMAGE_PIXELS: z.coerce.number().int().positive().default(40_000_000),
+  /** Lifetime of a staged upload that no memo has claimed yet. */
+  ATTACHMENT_TOKEN_TTL_MINUTES: z.coerce.number().int().min(1).default(1440),
+  /** Longest edge of the derived copy that may be sent to an OCR model. */
+  DERIVED_IMAGE_MAX_EDGE: z.coerce.number().int().min(256).default(2048),
   ENABLE_DEBUG_AI: z.enum(["true", "false"]).default("false"),
 });
 

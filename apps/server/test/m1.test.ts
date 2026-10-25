@@ -96,7 +96,7 @@ describe("migration 0003", () => {
     await call(h, "POST", "/api/v1/notes", { title: "giữ lại" });
     const again = runMigrations(h.db, MIGRATIONS_DIR);
     expect(again.applied).toBe(0);
-    expect(again.version).toBe(4);
+    expect(again.version).toBe(5);
     expect(count(h.db, "notes")).toBe(1);
   });
 });
@@ -255,7 +255,7 @@ describe("memos and sources", () => {
     const detail = (await call(h, "GET", `/api/v1/memos/${m.memo_id}`)).body;
     expect(detail.revision.raw_text).toBe("Mai 9h họp với Minh");
     expect(detail.sources).toEqual([
-      { entity_type: "task", entity_id: t.body.id, memo_revision_id: m.revision_id, quote: "họp với Minh" },
+      { entity_type: "task", entity_id: t.body.id, memo_revision_id: m.revision_id, quote: "họp với Minh", attachment_id: null, ocr_run_id: null },
     ]);
   });
 
