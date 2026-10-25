@@ -36,11 +36,11 @@ async function harness(root?: string, startMs = T0): Promise<H> {
   const config = {
     ...base,
     dataDir: path.join(dir, "data"),
-    APP_ORIGIN: "http://127.0.0.1:8081",
-    appOrigins: ["http://127.0.0.1:8081"],
+    APP_ORIGIN: "http://127.0.0.1:2311",
+    appOrigins: ["http://127.0.0.1:2311"],
     HOST: "127.0.0.1",
-    PORT: 4310,
-    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 4310),
+    PORT: 2310,
+    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 2310),
   };
   const paths = { ...dataPaths(config), dbFile: path.join(dir, "db", "p.sqlite") };
   ensureDataDirs(paths);
@@ -70,7 +70,7 @@ async function call(h: H, method: "GET" | "POST" | "PATCH", url: string, body?: 
   const res = await h.app.inject({
     method,
     url,
-    headers: { host: "127.0.0.1:4310", ...headers },
+    headers: { host: "127.0.0.1:2310", ...headers },
     ...(body === undefined ? {} : { payload: body as object }),
   });
   return { status: res.statusCode, body: res.json() as Record<string, any> };

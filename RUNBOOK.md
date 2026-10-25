@@ -25,7 +25,7 @@ Copy-Item .env.example .env      # chỉ placeholder, sửa sau nếu cần
 
 ```powershell
 .\scripts\start-local.ps1        # migrate + build server + start backend, chờ /health/ready
-npm run web --workspace apps/client   # terminal thứ hai: Expo web dev server (http://127.0.0.1:8081)
+npm run web --workspace apps/client   # terminal thứ hai: Expo web dev server (http://127.0.0.1:2311)
 ```
 
 Dừng:
@@ -38,12 +38,14 @@ Dừng:
 
 | Thành phần | URL |
 | --- | --- |
-| API | http://127.0.0.1:4310 |
-| Health live | http://127.0.0.1:4310/health/live |
-| Health ready | http://127.0.0.1:4310/health/ready |
-| Web dev (Expo) | http://127.0.0.1:8081 |
+| API | http://127.0.0.1:2310 |
+| Health live | http://127.0.0.1:2310/health/live |
+| Health ready | http://127.0.0.1:2310/health/ready |
+| Web dev (Expo) | http://127.0.0.1:2311 |
 
-Trang web đọc `EXPO_PUBLIC_API_BASE_URL` (mặc định `http://127.0.0.1:4310`). Khi web chạy ở origin khác (ví dụ bản build tĩnh phục vụ ở port khác), origin đó phải nằm trong `APP_ORIGIN` của backend, nếu không trình duyệt sẽ bị CORS chặn.
+Port mặc định: backend **2310**, web dev **2311** (`npm run web` đã gắn `--port 2311`). `APP_ORIGIN` mặc định cho phép cả `http://127.0.0.1:2311` và `http://localhost:2311` vì Expo thường mở `localhost`.
+
+Trang web đọc `EXPO_PUBLIC_API_BASE_URL` (mặc định `http://127.0.0.1:2310`). Lưu ý: Expo đọc biến `EXPO_PUBLIC_*` từ `apps/client/.env`, không phải `.env` ở gốc repo; chỉ cần đặt khi backend không ở 2310. Khi web chạy ở origin khác (ví dụ bản build tĩnh phục vụ ở port khác), origin đó phải nằm trong `APP_ORIGIN` của backend, nếu không trình duyệt bị CORS chặn và mọi thao tác ghi bị từ chối (403).
 
 ## Các lệnh kiểm tra
 
@@ -92,11 +94,11 @@ Trên web: trang chính → **Cài đặt AI** (`/settings`): thêm kết nối,
 
 ```powershell
 # 1) Thêm kết nối (key chỉ gửi khi ghi; GET không bao giờ trả key)
-curl.exe -X POST http://127.0.0.1:4310/api/v1/ai/connections -H "content-type: application/json" -d "{\"name\":\"Ollama\",\"kind\":\"ollama_local\",\"base_url\":\"http://127.0.0.1:11434/v1\",\"privacy_scope\":\"local\"}"
+curl.exe -X POST http://127.0.0.1:2310/api/v1/ai/connections -H "content-type: application/json" -d "{\"name\":\"Ollama\",\"kind\":\"ollama_local\",\"base_url\":\"http://127.0.0.1:11434/v1\",\"privacy_scope\":\"local\"}"
 # 2) Test (không lưu gì): metadata = GET /models, text = một câu chat ngắn
-curl.exe -X POST http://127.0.0.1:4310/api/v1/ai/connections/<id>/test -H "content-type: application/json" -d "{\"kind\":\"text\",\"model_id\":\"<model>\"}"
+curl.exe -X POST http://127.0.0.1:2310/api/v1/ai/connections/<id>/test -H "content-type: application/json" -d "{\"kind\":\"text\",\"model_id\":\"<model>\"}"
 # 3) Gán model cho vai trò information
-curl.exe -X PUT http://127.0.0.1:4310/api/v1/ai/roles -H "content-type: application/json" -d "{\"roles\":[{\"role\":\"information\",\"connection_id\":\"<id>\",\"model_id\":\"<model>\"}]}"
+curl.exe -X PUT http://127.0.0.1:2310/api/v1/ai/roles -H "content-type: application/json" -d "{\"roles\":[{\"role\":\"information\",\"connection_id\":\"<id>\",\"model_id\":\"<model>\"}]}"
 ```
 
 - OpenRouter/Ollama Cloud bắt buộc https. http chỉ cho địa chỉ loopback/LAN (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); địa chỉ link-local/metadata luôn bị chặn; không đi theo redirect.

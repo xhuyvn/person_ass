@@ -235,3 +235,9 @@ Acceptance có test tự động (provider giả lập): A01, A02 (08:30), A03/A
 ### Bước tiếp theo
 1. Chủ sở hữu chạy smoke thật OpenRouter + Ollama (A21) qua `/settings`, ghi kết quả.
 2. M3 (ảnh/OCR).
+
+---
+
+## Đổi port mặc định (25/10/2026, theo yêu cầu chủ sản phẩm)
+
+Backend 4310 → **2310**, web dev Expo 8081 → **2311** trong code (`config.ts`, client `kit.tsx`/`status.tsx`, script `npm run web --port 2311`, `start-local.ps1`), test, `.env.example`, RUNBOOK và docs/06. `APP_ORIGIN` mặc định nay là `http://127.0.0.1:2311,http://localhost:2311`. Các bảng kết quả kiểm tra ở trên giữ nguyên port đã dùng lúc chạy thật (4310/8081/4300) vì đó là bản ghi lịch sử.

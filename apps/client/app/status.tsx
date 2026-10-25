@@ -4,7 +4,7 @@ import type { HealthReady } from "@personalass/contracts";
 import { Screen, getTheme, spacing, typography } from "@personalass/ui";
 import { checkHealth } from "../src/lib/health";
 
-const DEFAULT_API_BASE_URL = "http://127.0.0.1:4310";
+const DEFAULT_API_BASE_URL = "http://127.0.0.1:2310";
 const READY_TIMEOUT_MS = 5000;
 
 type HealthState =

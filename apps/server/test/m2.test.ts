@@ -120,11 +120,11 @@ async function harness(startMs = T0): Promise<H> {
   const config = {
     ...base,
     dataDir: path.join(dir, "data"),
-    APP_ORIGIN: "http://127.0.0.1:8081",
-    appOrigins: ["http://127.0.0.1:8081"],
+    APP_ORIGIN: "http://127.0.0.1:2311",
+    appOrigins: ["http://127.0.0.1:2311"],
     HOST: "127.0.0.1",
-    PORT: 4310,
-    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 4310),
+    PORT: 2310,
+    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 2310),
   };
   const paths = { ...dataPaths(config), dbFile: path.join(dir, "db", "p.sqlite") };
   ensureDataDirs(paths);
@@ -157,7 +157,7 @@ async function call(h: H, method: "GET" | "POST" | "PATCH" | "PUT", url: string,
   const res = await h.app.inject({
     method,
     url,
-    headers: { host: "127.0.0.1:4310", ...headers },
+    headers: { host: "127.0.0.1:2310", ...headers },
     ...(body === undefined ? {} : { payload: body as object }),
   });
   return { status: res.statusCode, body: res.json() as Record<string, any>, raw: res.body };
@@ -212,9 +212,9 @@ describe("local mutation guard (docs/06 §1, A28)", () => {
     expect(evil.status).toBe(403);
     expect(evil.body.error.code).toBe("FORBIDDEN");
     expect(count(h.db, "memos")).toBe(0);
-    const ok = await call(h, "POST", "/api/v1/memos", body, { origin: "http://127.0.0.1:8081" });
+    const ok = await call(h, "POST", "/api/v1/memos", body, { origin: "http://127.0.0.1:2311" });
     expect(ok.status).toBe(201);
-    const same = await call(h, "POST", "/api/v1/memos", { ...body, client_request_id: uuid() }, { origin: "http://127.0.0.1:4310" });
+    const same = await call(h, "POST", "/api/v1/memos", { ...body, client_request_id: uuid() }, { origin: "http://127.0.0.1:2310" });
     expect(same.status).toBe(201);
     // Reads are not blocked by the Origin guard.
     expect((await call(h, "GET", "/api/v1/memos", undefined, { origin: "https://evil.example" })).status).toBe(200);

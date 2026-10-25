@@ -12,7 +12,7 @@ export function readApiBaseUrl(): string {
   } catch {
     // fall through to the local default
   }
-  return "http://127.0.0.1:4310";
+  return "http://127.0.0.1:2310";
 }
 
 export type Msg = { kind: "ok" | "error"; text: string } | null;
