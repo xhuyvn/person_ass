@@ -10,6 +10,8 @@ import type { Db } from "./db/open.js";
 import { registerHealthRoutes } from "./api/health.js";
 import { buildOpenApi, registerV1Routes } from "./api/v1.js";
 import type { Clock } from "./domain/core.js";
+import type { AiDeps } from "./domain/ai-config.js";
+import { policyTransport } from "./ai/net-policy.js";
 import { appVersion } from "./version.js";
 import { createLogger, type Logger } from "./logger.js";
 
@@ -23,6 +25,9 @@ export type AppDeps = {
   logger?: Logger;
   /** Injectable for deterministic tests (docs/05 §6). */
   clock?: Clock;
+  /** Master-key box and outbound transport for the AI layer. */
+  ai?: AiDeps;
+  onJobQueued?: () => void;
 };
 
 export function resolveCorrelationId(request: FastifyRequest): string {
@@ -113,6 +118,23 @@ function resolveErrorStatusCode(error: unknown): number {
   return resolveErrorOutcome(error).status;
 }
 
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Origin check for state-changing requests. No Origin header (curl, tests,
+ * same-process tools) is accepted; otherwise the Origin must be an allowed
+ * app origin or the server's own origin (same-origin web build).
+ */
+export function isAllowedOrigin(request: FastifyRequest, appOrigins: readonly string[]): boolean {
+  const raw = request.headers.origin;
+  const origin = Array.isArray(raw) ? raw[0] : raw;
+  if (origin === undefined) return true;
+  if (origin === "null") return false;
+  if (appOrigins.includes(origin)) return true;
+  const host = request.headers.host;
+  return host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+}
+
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const logger = deps.logger ?? createLogger(deps.config.LOG_LEVEL);
   const app = Fastify({
@@ -136,6 +158,22 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       return reply.send(
         apiErrorSchema.parse(
           toErrorEnvelope("FORBIDDEN", "Host không được phép.", {
+            correlationId: scoped.correlationId,
+            retryable: false,
+          }),
+        ),
+      );
+    }
+
+    // Mutations from a foreign website (docs/06 §1, A28): browsers always send
+    // Origin on cross-origin POST/PATCH/PUT/DELETE, so a mismatching Origin is
+    // refused before any route runs. Non-browser local clients send no Origin.
+    if (!SAFE_METHODS.has(request.method) && !isAllowedOrigin(request, deps.config.appOrigins)) {
+      reply.code(403);
+      reply.header("x-correlation-id", scoped.correlationId);
+      return reply.send(
+        apiErrorSchema.parse(
+          toErrorEnvelope("FORBIDDEN", "Origin không được phép.", {
             correlationId: scoped.correlationId,
             retryable: false,
           }),
@@ -226,6 +264,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const ops = await registerV1Routes(app, {
     db: deps.db,
     clock: deps.clock ?? (() => new Date()),
+    ai: deps.ai ?? { secrets: null, transport: policyTransport },
+    onJobQueued: deps.onJobQueued,
   });
   const openapi = buildOpenApi(ops, appVersion());
   app.get("/api/v1/openapi.json", async () => openapi);

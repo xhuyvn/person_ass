@@ -96,7 +96,7 @@ describe("migration 0003", () => {
     await call(h, "POST", "/api/v1/notes", { title: "giữ lại" });
     const again = runMigrations(h.db, MIGRATIONS_DIR);
     expect(again.applied).toBe(0);
-    expect(again.version).toBe(3);
+    expect(again.version).toBe(4);
     expect(count(h.db, "notes")).toBe(1);
   });
 });
@@ -237,7 +237,9 @@ describe("memos and sources", () => {
     expect(a.status).toBe(201);
     expect(b.status).toBe(200);
     expect(b.body.memo_id).toBe(a.body.memo_id);
-    expect(a.body.job_id).toBeNull();
+    // M2: one job per memo; the repeat returns the same job, never a second one.
+    expect(b.body.job_id).toBe(a.body.job_id);
+    expect(count(h.db, "jobs")).toBe(1);
     expect(count(h.db, "memos")).toBe(1);
     expect(count(h.db, "memo_revisions")).toBe(1);
   });

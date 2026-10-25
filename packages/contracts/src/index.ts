@@ -161,14 +161,19 @@ export const memoCreateSchema = z.object({
   text: z.string().trim().min(1).max(20000),
   captured_at: isoInstant,
   timezone: z.string().min(1).default("Asia/Ho_Chi_Minh"),
+  /** M2: queue AI processing after the memo is durably saved. */
+  process: z.boolean().default(true),
+  /** local_only memos are never sent to a cloud connection (docs/04 §6, A20). */
+  privacy: z.enum(["default", "local_only"]).default("default"),
 });
 export type MemoCreate = z.infer<typeof memoCreateSchema>;
 
 export const memoReceiptSchema = z.object({
   memo_id: uuid,
   revision_id: uuid,
-  job_id: z.null(),
-  state: z.literal("saved"),
+  job_id: uuid.nullable(),
+  /** "saved" = stored without AI processing; "queued" = a job was created. */
+  state: z.enum(["saved", "queued"]),
 });
 export type MemoReceipt = z.infer<typeof memoReceiptSchema>;
 
@@ -198,6 +203,12 @@ export const memoDetailSchema = z.object({
       quote: z.string().nullable(),
     }),
   ),
+  privacy: z.enum(["default", "local_only"]),
+  /** Latest processing job of the current revision (null = never processed). */
+  job: z.lazy(() => jobSchema).nullable(),
+  /** Actions of every proposal made from this memo, newest first. */
+  actions: z.array(z.lazy(() => proposalActionSchema)),
+  clarifications: z.array(z.lazy(() => clarificationSchema)),
 });
 export type MemoDetail = z.infer<typeof memoDetailSchema>;
 
@@ -408,3 +419,271 @@ export const listQuerySchema = z.object({
   unread: z.enum(["true", "false"]).optional(),
 });
 export type ListQuery = z.infer<typeof listQuerySchema>;
+
+/* ------------------------------------------------------------------ */
+/* M2 — AI text: connections, roles, jobs, proposals (docs/03, docs/04) */
+/* ------------------------------------------------------------------ */
+
+export const AI_CONNECTION_KINDS = ["openrouter", "ollama_local", "ollama_cloud", "custom_openai"] as const;
+export const aiConnectionKindSchema = z.enum(AI_CONNECTION_KINDS);
+export type AiConnectionKind = z.infer<typeof aiConnectionKindSchema>;
+
+export const AI_ROLES = ["information", "ocr", "assistant"] as const;
+export const aiRoleSchema = z.enum(AI_ROLES);
+export type AiRole = z.infer<typeof aiRoleSchema>;
+
+/**
+ * How to ask for JSON: "auto" tries native json_schema and falls back to a
+ * plain JSON instruction when the endpoint rejects it (docs/04 §8).
+ */
+export const structuredOutputSchema = z.enum(["auto", "json_schema", "json_object", "none"]);
+export type StructuredOutput = z.infer<typeof structuredOutputSchema>;
+
+const baseUrl = z.string().trim().min(1).max(500);
+const apiKey = z.string().trim().min(1).max(4096);
+const timeoutMs = z.number().int().min(1000).max(900000);
+
+export const aiConnectionCreateSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  kind: aiConnectionKindSchema,
+  base_url: baseUrl,
+  /** Write-only: stored encrypted, never returned. */
+  api_key: apiKey.optional(),
+  /** Declared by the owner; a LAN URL is not automatically "local" (docs/04 §6). */
+  privacy_scope: z.enum(["local", "cloud"]),
+  enabled: z.boolean().default(true),
+  timeout_ms: timeoutMs.default(120000),
+  structured_output: structuredOutputSchema.default("auto"),
+});
+export type AiConnectionCreate = z.infer<typeof aiConnectionCreateSchema>;
+
+export const aiConnectionPatchSchema = z.object({
+  expected_version: expectedVersion,
+  name: z.string().trim().min(1).max(100).optional(),
+  base_url: baseUrl.optional(),
+  /** A new key replaces the old one; an empty value never clears it. */
+  api_key: apiKey.optional(),
+  clear_api_key: z.literal(true).optional(),
+  privacy_scope: z.enum(["local", "cloud"]).optional(),
+  enabled: z.boolean().optional(),
+  timeout_ms: timeoutMs.optional(),
+  structured_output: structuredOutputSchema.optional(),
+});
+export type AiConnectionPatch = z.infer<typeof aiConnectionPatchSchema>;
+
+export const aiConnectionSchema = z.object({
+  id: uuid,
+  name: z.string(),
+  kind: aiConnectionKindSchema,
+  base_url: z.string(),
+  privacy_scope: z.enum(["local", "cloud"]),
+  enabled: z.boolean(),
+  key_configured: z.boolean(),
+  /** Masked hint such as "…a1b2"; never the key. */
+  key_label: z.string().nullable(),
+  timeout_ms: z.number().int(),
+  structured_output: structuredOutputSchema,
+  version: z.number().int(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export type AiConnection = z.infer<typeof aiConnectionSchema>;
+
+export const PROVIDER_ERROR_CODES = [
+  "auth",
+  "rate_limited",
+  "unavailable",
+  "timeout",
+  "model_not_found",
+  "bad_request",
+  "blocked_by_policy",
+  "invalid_response",
+  "not_configured",
+] as const;
+
+export const providerErrorSchema = z.object({
+  code: z.enum(PROVIDER_ERROR_CODES),
+  message: z.string(),
+});
+export type ProviderErrorDto = z.infer<typeof providerErrorSchema>;
+
+/** Test without saving anything (docs/03 §4). */
+export const aiConnectionTestSchema = z.object({
+  kind: z.enum(["metadata", "text"]),
+  model_id: z.string().trim().min(1).max(200).optional(),
+});
+export type AiConnectionTest = z.infer<typeof aiConnectionTestSchema>;
+
+export const aiConnectionTestResultSchema = z.object({
+  ok: z.boolean(),
+  kind: z.enum(["metadata", "text"]),
+  latency_ms: z.number().int().nullable(),
+  models_count: z.number().int().nullable(),
+  sample: z.string().nullable(),
+  error: providerErrorSchema.nullable(),
+});
+export type AiConnectionTestResult = z.infer<typeof aiConnectionTestResultSchema>;
+
+const capability = z.enum(["yes", "no", "unknown"]);
+export const aiModelSchema = z.object({
+  id: z.string(),
+  capabilities: z.object({ image_input: capability, json_schema: capability, tools: capability }),
+});
+export type AiModel = z.infer<typeof aiModelSchema>;
+
+export const aiModelListSchema = z.object({
+  items: z.array(aiModelSchema),
+  error: providerErrorSchema.nullable(),
+  /** The model id can always be typed by hand (docs/04 §1). */
+  manual_allowed: z.literal(true),
+});
+export type AiModelList = z.infer<typeof aiModelListSchema>;
+
+const modelRef = z.object({ connection_id: uuid, model_id: z.string().trim().min(1).max(200) });
+
+export const aiRoleBindingInputSchema = z.object({
+  role: aiRoleSchema,
+  connection_id: uuid,
+  model_id: z.string().trim().min(1).max(200),
+  max_tokens: z.number().int().min(64).max(32768).default(2048),
+  temperature: z.number().min(0).max(2).nullable().default(0.1),
+  fallback: z
+    .object({
+      bindings: z.array(modelRef).max(3).default([]),
+      /** Fallback may only reach a cloud connection when explicitly allowed. */
+      allow_cloud: z.boolean().default(false),
+    })
+    .default({ bindings: [], allow_cloud: false }),
+});
+export type AiRoleBindingInput = z.infer<typeof aiRoleBindingInputSchema>;
+
+export const aiRolesPutSchema = z.object({ roles: z.array(aiRoleBindingInputSchema).min(1).max(3) });
+export type AiRolesPut = z.infer<typeof aiRolesPutSchema>;
+
+export const aiRoleBindingSchema = z.object({
+  role: aiRoleSchema,
+  connection_id: uuid,
+  model_id: z.string(),
+  max_tokens: z.number().int(),
+  temperature: z.number().nullable(),
+  fallback: z.object({ bindings: z.array(modelRef), allow_cloud: z.boolean() }),
+  version: z.number().int(),
+  updated_at: z.string(),
+});
+export type AiRoleBinding = z.infer<typeof aiRoleBindingSchema>;
+
+/* ---- jobs ---- */
+
+export const JOB_STATES = [
+  "queued",
+  "running",
+  "retry_wait",
+  "waiting_configuration",
+  "succeeded",
+  "failed",
+  "cancelled",
+] as const;
+export type JobState = (typeof JOB_STATES)[number];
+
+export const jobSchema = z.object({
+  id: uuid,
+  kind: z.literal("process_memo"),
+  memo_revision_id: uuid,
+  state: z.enum(JOB_STATES),
+  attempt: z.number().int(),
+  max_attempts: z.number().int(),
+  run_after: z.string(),
+  /** Secret-free error summary. */
+  error_code: z.string().nullable(),
+  error_message: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export type Job = z.infer<typeof jobSchema>;
+
+/* ---- proposals, clarifications, undo ---- */
+
+export const PROPOSAL_ACTION_STATUSES = [
+  "applied",
+  "needs_clarification",
+  "waiting_dependency",
+  "rejected",
+  "duplicate",
+  "dismissed",
+] as const;
+export type ProposalActionStatus = (typeof PROPOSAL_ACTION_STATUSES)[number];
+
+export const proposalActionSchema = z.object({
+  id: uuid,
+  proposal_id: uuid,
+  operation: z.string(),
+  entity_type: z.string(),
+  target_id: z.string().nullable(),
+  status: z.enum(PROPOSAL_ACTION_STATUSES),
+  reason: z.string().nullable(),
+  fields: z.record(z.string(), z.unknown()),
+  evidence: z.array(z.object({ quote: z.string() })),
+  result_entity_type: z.string().nullable(),
+  result_entity_id: z.string().nullable(),
+  action_group_id: z.string().nullable(),
+  created_at: z.string(),
+});
+export type ProposalAction = z.infer<typeof proposalActionSchema>;
+
+export const CLARIFICATION_KINDS = ["missing_fields", "choose_target", "confirm", "revalidate"] as const;
+export type ClarificationKind = (typeof CLARIFICATION_KINDS)[number];
+
+export const clarificationSchema = z.object({
+  id: uuid,
+  proposal_action_id: uuid,
+  kind: z.enum(CLARIFICATION_KINDS),
+  field_path: z.string().nullable(),
+  question: z.string(),
+  options: z.array(z.object({ value: z.string(), label: z.string() })),
+  state: z.enum(["open", "answered", "dismissed"]),
+  version: z.number().int(),
+  created_at: z.string(),
+});
+export type Clarification = z.infer<typeof clarificationSchema>;
+
+export const clarificationAnswerSchema = z.object({
+  expected_version: expectedVersion,
+  answer: z.union([
+    /** Supply the missing/uncertain fields, e.g. {starts_at}. */
+    z.object({ fields: z.record(z.string(), z.unknown()) }).strict(),
+    /** Pick one of the offered targets (choose_target). */
+    z.object({ choice: z.string().min(1).max(100) }).strict(),
+    /** Confirm a change that needs explicit consent (confirm/revalidate). */
+    z.object({ confirm: z.literal(true) }).strict(),
+    /** Drop this action; nothing is created. */
+    z.object({ dismiss: z.literal(true) }).strict(),
+  ]),
+});
+export type ClarificationAnswer = z.infer<typeof clarificationAnswerSchema>;
+
+export const clarificationResultSchema = z.object({
+  clarification: clarificationSchema,
+  action: proposalActionSchema,
+});
+export type ClarificationResult = z.infer<typeof clarificationResultSchema>;
+
+export const undoResultSchema = z.object({
+  action_group_id: uuid,
+  state: z.literal("undone"),
+  reverted: z.array(z.object({ entity_type: z.string(), entity_id: z.string() })),
+});
+export type UndoResult = z.infer<typeof undoResultSchema>;
+
+export const auditEventSchema = z.object({
+  id: uuid,
+  actor: z.enum(["user", "ai", "system"]),
+  action: z.string(),
+  entity_type: z.string().nullable(),
+  entity_id: z.string().nullable(),
+  action_group_id: z.string().nullable(),
+  before: z.unknown(),
+  after: z.unknown(),
+  source: z.string().nullable(),
+  created_at: z.string(),
+});
+export type AuditEvent = z.infer<typeof auditEventSchema>;

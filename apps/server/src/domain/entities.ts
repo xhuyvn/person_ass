@@ -112,7 +112,7 @@ function updateVersioned(
   return requireRow(ctx, table, id, label);
 }
 
-function linkSource(ctx: Ctx, entityType: string, entityId: string, source?: SourceRef): void {
+export function linkSource(ctx: Ctx, entityType: string, entityId: string, source?: SourceRef): void {
   if (!source) return;
   const rev = ctx.db
     .prepare(
@@ -128,9 +128,19 @@ function linkSource(ctx: Ctx, entityType: string, entityId: string, source?: Sou
     .prepare(
       `INSERT INTO source_links
          (id, owner_id, entity_type, entity_id, memo_revision_id, quote, field_path, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(newId(), OWNER_ID, entityType, entityId, source.memo_revision_id, source.quote ?? null, now, now);
+    .run(
+      newId(),
+      OWNER_ID,
+      entityType,
+      entityId,
+      source.memo_revision_id,
+      source.quote ?? null,
+      ctx.auditSource ?? "manual",
+      now,
+      now,
+    );
 }
 
 function listEntities<T>(

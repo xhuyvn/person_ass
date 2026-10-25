@@ -111,6 +111,9 @@ export function createApi(options: ApiOptions) {
         text,
         captured_at: capturedAt,
         timezone,
+        // The M1 screen creates tasks from a memo by hand and does not show
+        // AI results yet; AI processing is switched on with the M2 UI.
+        process: false,
       }),
     listTasks: (): Promise<Task[]> => request("GET", "/tasks?limit=100", taskPage).then((p) => p.items),
     createTask: (input: { title: string; due_date?: string; source?: { memo_revision_id: string; quote?: string } }): Promise<Task> =>

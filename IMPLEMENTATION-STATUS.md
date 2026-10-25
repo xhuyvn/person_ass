@@ -8,7 +8,8 @@ Ngày bàn giao thiết kế: 21/10/2026. M0 triển khai xong ngày 22/10/2026.
 | --- | --- | --- |
 | M0 Nền | **Đã làm, đã kiểm tra** | 57 test vitest pass; typecheck/build server/build web pass; migrate idempotent; web gọi health thật qua trình duyệt |
 | M1 Manual slice | **Đã làm, đã kiểm tra (web)** | 126 test pass (contracts 24, server 86, client 16); E2E trình duyệt: memo → việc có nguồn → lịch hẹn → nhắc thật → restart backend → nhắc còn → ack/hoàn thành |
-| M2–M6 | Chưa bắt đầu | — |
+| M2 AI text | **Backend đã làm, đã kiểm tra bằng mock; UI chưa làm** | 157 test pass (contracts 24, server 117 — 31 test M2 mới, client 16); smoke server build thật + endpoint OpenAI-compatible giả lập trên loopback. Chưa smoke provider thật (cần key của chủ sở hữu) |
+| M3–M6 | Chưa bắt đầu | — |
 
 Coder cập nhật file này sau mỗi milestone. Giữ test/benchmark chưa chạy ở trạng thái chưa xác minh.
 
@@ -140,3 +141,57 @@ Acceptance đã có test tự động: A01, A02 (nhắc 08:30), A07, A13 (digest
 
 ### Bước tiếp theo
 Dọn các hạn chế 1–3 nếu muốn đóng M1 chặt hơn, rồi sang M2 (AI text: connections, adapters, proposals/policy).
+
+---
+
+## M2 — AI text, phần backend (25/10/2026)
+
+Phạm vi phiên này (chủ sản phẩm chọn): sửa lỗ hổng Origin cho mutation, rồi làm backend M2. UI M2 (màn cấu hình AI, hiển thị kết quả/làm rõ/hoàn tác) là bước kế tiếp.
+
+### Đã làm
+- **Chặn mutation từ website lạ** (`app.ts`): POST/PATCH/PUT/DELETE có header `Origin` không thuộc `APP_ORIGIN` và không cùng origin với server → 403 trước khi vào route. Request không có Origin (curl, tiến trình local) vẫn được nhận. Chưa có CSRF token/bootstrap session đầy đủ như docs/06 §1 (để M5).
+- **Migration `0004_m2_ai.sql`** (additive, schema version 4): `memos.privacy`, `ai_connections`, `ai_role_bindings`, `jobs` (lease + fencing_token), `ai_runs`, `proposals`, `proposal_actions` (unique partial index `(memo_revision_id, stable_key) WHERE status='applied'`), `clarifications`.
+- **Master key** (`secrets/master-key.ts`): AES-256-GCM, AAD = id kết nối. `MASTER_KEY` hoặc `MASTER_KEY_FILE` (mặc định `DATA_DIR/secrets/master.key`; local mode tự sinh một lần với flag `wx`; server mode không bao giờ tự sinh).
+- **Chính sách endpoint** (`ai/net-policy.ts`): chỉ http/https; OpenRouter/Ollama Cloud bắt buộc https; http chỉ tới loopback/mạng riêng; chặn link-local/metadata/multicast; kiểm IP **lúc kết nối** (lookup tùy biến, chống DNS rebinding); allowlist host:port theo kết nối; không đi theo redirect; timeout cứng; giới hạn 8 MB phản hồi. Đổi host của kết nối đã có key bắt buộc nhập lại key.
+- **Adapter OpenAI-compatible** (`ai/openai-compatible.ts`): `/models` (capability lấy từ metadata nếu provider có, còn lại `unknown`), `/chat/completions`; `structured_output=auto` thử `json_schema` rồi bỏ `response_format` nếu endpoint trả 400/422; placeholder key `ollama` cho Ollama local; phân loại lỗi 401/403→auth, 404→model_not_found, 429 (Retry-After)→rate_limited, 5xx/mạng→unavailable, timeout; thông điệp lỗi đã che key.
+- **API**: `GET/POST/PATCH /ai/connections`, `POST /ai/connections/:id/test` (metadata/text, không lưu), `GET /ai/connections/:id/models` (lỗi → `items: []`, `manual_allowed: true`), `GET/PUT /ai/roles` (fallback có `allow_cloud`), `GET /jobs/:id`, `POST /memos/:id/reprocess` (202), `GET /clarifications`, `POST /clarifications/:id/answer`, `POST /action-groups/:id/undo`, `GET /audit-events`. `POST /memos` nhận `process` (mặc định true) và `privacy`; receipt có `job_id`, `state: queued`. `GET /memos/:id` thêm `privacy`, `job`, `actions`, `clarifications`. OpenAPI sinh từ cùng schema Zod.
+- **Worker** (`jobs/worker.ts`): job tạo trong cùng transaction với memo; claim có điều kiện + tăng fencing token; heartbeat 15 s, lease 90 s; không giữ transaction khi gọi LLM; concurrency 1; được đánh thức ngay khi có job mới, poll 2 s. 429/5xx/mạng → `retry_wait` backoff mũ + jitter, tôn trọng Retry-After, tối đa 3 lần → `failed`; 401/403/404/thiếu cấu hình → `waiting_configuration` (tự xếp lại khi sửa kết nối/role). Lease hết hạn ở lần thử cuối → `failed` (`lease_expired`). Fallback theo thứ tự; memo `local_only` không bao giờ tới kết nối `cloud`; local → cloud chỉ khi `allow_cloud`.
+- **Prompt** (`ai/prompt.ts`): seed `prompts/information-system.txt` + hướng dẫn trường + JSON Schema; `prompt_version = information@<sha256 12 ký tự>`. Context gồm captured_at kèm thứ trong tuần theo múi giờ, defaults, tối đa 30 lịch hẹn + 30 task ứng viên (query, không gửi cả DB). Memo được rào `<<<MEMO … MEMO>>>` và ghi rõ là dữ liệu chưa tin cậy.
+- **Proposal → policy → apply** (`domain/proposals.ts`): parse + validate envelope strict (chỉ gỡ một lớp code fence, không vá JSON), sửa tối đa một lần. Mỗi action: evidence phải khớp nguyên văn memo; `stable_key` do backend tính; trùng key đã áp dụng → `duplicate`; trùng tiêu đề trong cùng memo → hỏi xác nhận. Policy docs/04 §4: tạo task/note/lịch rõ → áp dụng; ambiguity/thiếu giờ → `missing_fields`; update một target rõ, đúng version → áp dụng + reschedule + undo; nhiều target → `choose_target`; target đã bị sửa → `revalidate`; đổi trạng thái (hủy/xong/lưu trữ) và `request_confirmation` → `confirm`; person/asset/interaction/maintenance → `rejected` (`entity_type_not_supported_yet`, làm ở M4). Toàn bộ apply + source link + reminder + audit (actor `ai`, `action_group_id`) + job succeeded nằm trong **một** transaction, mỗi action trong savepoint, kiểm fencing token ở cuối.
+- **Trả lời làm rõ**: revalidate rồi áp dụng trên version hiện tại, tạo action group riêng (actor `user`, source `ai_clarification`), hoàn tác được.
+- **Undo**: chỉ khi mọi entity còn đúng version nhóm để lại; nếu đã sửa tay → 409, `field_errors` liệt kê trường lệch, không hoàn tác một phần. Tạo → archive (hủy nhắc); sửa → khôi phục trường trước (nhắc được lập lại).
+- Client web M1 gửi memo với `process: false` để không sinh task trùng với luồng tạo task tay khi chưa có UI M2.
+
+### Lệnh kiểm tra
+| Lệnh | Kết quả |
+| --- | --- |
+| `npm ci` | OK |
+| `npm run typecheck` | PASS (client, server, contracts, ui) |
+| `npm test` | PASS — contracts 24, server 117 (31 test M2 mới trong `test/m2.test.ts`), client 16 |
+| `npm run build:server` | PASS |
+| Smoke: `node apps/server/dist/index.js` (DATA_DIR tạm, port 4398) + server OpenAI-compatible giả lập ở 127.0.0.1:4399 | master key file tự sinh; tạo kết nối `ollama_local` có key; test metadata OK; gán role; POST memo → worker được đánh thức → job `succeeded` trong < 2 s, task được tạo; chuỗi key không xuất hiện trong file SQLite và log |
+
+Acceptance có test tự động (provider giả lập): A01, A02 (08:30), A03/A05 (fixture: task áp dụng, lịch khám thành clarification, không có appointment chính thức), A07, A08 (reprocess cùng output → `duplicate`, không thêm task/audit), A09 (JSON sai/operation lạ → sửa 1 lần → lỗi rõ, memo còn), A10, A11 (dời lịch, hủy nhắc cũ, tạo nhắc mới, undo), A12, A17, A18, A19 (offline → retry_wait, scheduler vẫn tạo thông báo), A20, A27 (key không có trong response/audit/DB/log), A28 (Origin lạ cho mutation), A30 (mức prompt: captured_at kèm thứ được gửi cho model), A32 (fencing).
+
+### Test bỏ qua / chưa xác minh
+| Mục | Lý do |
+| --- | --- |
+| Smoke OpenRouter + Ollama thật (A21, điều kiện qua M2) | Cần API key/endpoint thật của chủ sở hữu; chưa chạy. Làm theo RUNBOOK mục "Cấu hình AI" |
+| Chất lượng trích xuất của model thật (A02 "mai", A04, A30 end-to-end) | Test dùng proposal viết sẵn; chỉ kiểm backend xử lý đúng proposal, không kiểm model hiểu đúng tiếng Việt |
+| E2E web cho clarification/undo/settings | Chưa có UI M2 |
+| `policyTransport` tới host public qua https | Test mạng thật chỉ chạy trên loopback; https dùng cùng code path nhưng chưa có test mạng ngoài |
+
+### Hạn chế đã biết
+1. Chưa có UI M2: màn kết nối/model/role, hiển thị kết quả xử lý memo, trả lời clarification, nút hoàn tác.
+2. A04 (waiting on person) và person/asset chưa hỗ trợ — action bị `rejected` có lý do, chờ M4.
+3. Ngân sách mỗi memo mới giới hạn số lần gọi (3 attempt × (1 + 1 repair) × số target fallback); chưa giới hạn token riêng.
+4. `ENABLE_DEBUG_AI` chưa có tác dụng: không lưu raw request/response (đúng mặc định docs/04 §6).
+5. Kiểm Origin mới là lớp chống CSRF đầu tiên; token CSRF/bootstrap session local và kiểm `Content-Type` để M5.
+6. Nhiều ambiguity của cùng một action được gộp thành một câu hỏi.
+7. Undo nhóm sửa task chỉ khôi phục title/description/hạn/planned_at/status.
+8. Ứng viên gửi cho model là 30 lịch hẹn sắp tới + 30 task mở gần nhất, chưa lọc theo nội dung (search ở M4).
+
+### Bước tiếp theo
+1. UI M2 trên web: cài đặt AI (kết nối, test, model, role, fallback), trạng thái xử lý memo, danh sách làm rõ và trả lời, nút hoàn tác; bỏ `process: false` ở client.
+2. Chủ sở hữu chạy smoke thật với OpenRouter và Ollama (A21), ghi kết quả vào đây.
+3. Sau đó M3 (ảnh/OCR).

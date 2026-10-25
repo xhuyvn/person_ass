@@ -75,7 +75,32 @@ Muốn dùng thư mục khác: đặt `DATA_DIR` trong `.env` hoặc biến môi
 
 ## Biến môi trường
 
-Xem `.env.example` (theo docs/06 §4). `APP_MODE=server` chưa dùng ở M0; `MASTER_KEY`/`MASTER_KEY_FILE` chỉ là placeholder cho M2/M6. Không đặt secret vào `EXPO_PUBLIC_*` (biến này được nội tuyến vào bundle web).
+Xem `.env.example` (theo docs/06 §4). Không đặt secret vào `EXPO_PUBLIC_*` (biến này được nội tuyến vào bundle web).
+
+### Master key (M2)
+
+API key của provider được mã hóa AES-256-GCM bằng master key nằm **ngoài** database:
+
+- `MASTER_KEY` (32 byte, base64 hoặc hex) nếu đặt sẽ được dùng trước.
+- Nếu không, dùng file `MASTER_KEY_FILE` (mặc định `DATA_DIR/secrets/master.key`). Ở `APP_MODE=local`, lần chạy đầu tự sinh file này (quyền chỉ chủ sở hữu, log `master_key_loaded` với `created: true`). `APP_MODE=server` không bao giờ tự sinh: thiếu file là dừng khởi động.
+- **Sao lưu master key riêng**, không để chung với backup dữ liệu. Mất master key thì phải nhập lại API key cho từng kết nối; không có cách giải mã giả.
+- Nếu master key lỗi ở local mode, app vẫn chạy (log `master_key_unavailable`) nhưng không lưu/dùng được API key.
+
+## Cấu hình AI (M2, qua API — UI sẽ có sau)
+
+```powershell
+# 1) Thêm kết nối (key chỉ gửi khi ghi; GET không bao giờ trả key)
+curl.exe -X POST http://127.0.0.1:4310/api/v1/ai/connections -H "content-type: application/json" -d "{\"name\":\"Ollama\",\"kind\":\"ollama_local\",\"base_url\":\"http://127.0.0.1:11434/v1\",\"privacy_scope\":\"local\"}"
+# 2) Test (không lưu gì): metadata = GET /models, text = một câu chat ngắn
+curl.exe -X POST http://127.0.0.1:4310/api/v1/ai/connections/<id>/test -H "content-type: application/json" -d "{\"kind\":\"text\",\"model_id\":\"<model>\"}"
+# 3) Gán model cho vai trò information
+curl.exe -X PUT http://127.0.0.1:4310/api/v1/ai/roles -H "content-type: application/json" -d "{\"roles\":[{\"role\":\"information\",\"connection_id\":\"<id>\",\"model_id\":\"<model>\"}]}"
+```
+
+- OpenRouter/Ollama Cloud bắt buộc https. http chỉ cho địa chỉ loopback/LAN (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); địa chỉ link-local/metadata luôn bị chặn; không đi theo redirect.
+- `privacy_scope` do bạn khai báo: memo `privacy: "local_only"` chỉ được gửi tới kết nối `local`. Fallback từ local sang cloud chỉ khi `allow_cloud: true`.
+- Memo lưu trước, job xử lý sau. Không có cấu hình hoặc key sai → job `waiting_configuration`, tự chạy lại khi sửa kết nối/role. Provider offline/429 → `retry_wait` (tối đa 3 lần). Xem `GET /api/v1/jobs/:id`.
+- Màn web M1 hiện gửi memo với `process: false` (chưa hiển thị kết quả AI); gọi API trực tiếp để thử pipeline AI.
 
 ## Cấu trúc repo
 
@@ -93,6 +118,6 @@ docs/            đặc tả thiết kế (không sửa khi code)
 
 `packages/contracts` không import server/SQLite/UI. `apps/server` không import React. `packages/ui` không import server.
 
-## Điều chưa có ở M0
+## Điều chưa có
 
-Không có AI/provider, không có ghi memo/task, không có scheduler, không có notification, không có auth, không có upload ảnh, không có Docker. Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.
+Chưa có UI cấu hình AI/làm rõ/hoàn tác (API đã có ở M2), chưa có OCR/upload ảnh (M3), auth (M6), Docker (M6). Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.

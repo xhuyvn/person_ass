@@ -8,6 +8,10 @@ import {
 import { findMigrationsDir, runMigrations } from "./db/migrate.js";
 import { closeDatabase, openDatabase, type Db } from "./db/open.js";
 import { startScheduler } from "./domain/scheduler.js";
+import { policyTransport } from "./ai/net-policy.js";
+import type { AiDeps } from "./domain/ai-config.js";
+import { startWorker } from "./jobs/worker.js";
+import { loadMasterKey } from "./secrets/master-key.js";
 import { createLogger } from "./logger.js";
 import { appVersion } from "./version.js";
 
@@ -33,12 +37,41 @@ async function main(): Promise<void> {
     });
 
     const clock = () => new Date();
-    const app = await buildApp({ config, paths, db, migrationsDir, logger, clock });
+
+    // Master key for provider API keys (docs/06 §2). Server mode fails closed;
+    // in local mode the app keeps running and reports that keys cannot be used.
+    let ai: AiDeps = { secrets: null, transport: policyTransport };
+    try {
+      const mk = loadMasterKey(config, paths);
+      ai = { secrets: mk.box, transport: policyTransport };
+      logger.info("master_key_loaded", {
+        source: mk.source.kind,
+        ...(mk.source.kind === "file" ? { created: mk.source.created } : {}),
+      });
+    } catch (err) {
+      if (config.APP_MODE === "server") throw err;
+      logger.error("master_key_unavailable", { error: err instanceof Error ? err.message : String(err) });
+    }
+
+    let wakeWorker: () => void = () => undefined;
+    const app = await buildApp({
+      config,
+      paths,
+      db,
+      migrationsDir,
+      logger,
+      clock,
+      ai,
+      onJobQueued: () => wakeWorker(),
+    });
     const stopScheduler = startScheduler({ db, clock }, logger);
+    const worker = startWorker({ db, clock, ai, logger });
+    wakeWorker = worker.wake;
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info("shutdown_started", { signal });
       stopScheduler();
+      await worker.stop();
       try {
         await app.close();
       } catch (err) {
