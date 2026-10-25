@@ -224,7 +224,11 @@ export function resolveConnection(ctx: Ctx, ai: AiDeps, id: string): ResolvedCon
   };
 }
 
-/** Connection test: never saves anything and never throws for provider errors. */
+/** Synthetic 16×16 PNG (black rectangle on white) for the image-input test; no user data. */
+const TEST_IMAGE_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAGklEQVR4nGP4TyJgGPEaGHCAoaSBZE+PFA0AOh+df8lUpI4AAAAASUVORK5CYII=";
+
+/** Connection test: never saves anything and never throws for provider errors. "image" checks the model accepts image input. */
 export async function testConnection(
   ctx: Ctx,
   ai: AiDeps,
@@ -240,11 +244,22 @@ export async function testConnection(
       return { ...base, ok: true, latency_ms: Date.now() - started, models_count: models.length, error: null };
     }
     if (!input.model_id) {
-      throw new DomainError("BAD_REQUEST", "Cần model_id để test text.", { model_id: "Bắt buộc với kind=text." });
+      throw new DomainError("BAD_REQUEST", `Cần model_id để test ${input.kind}.`, { model_id: `Bắt buộc với kind=${input.kind}.` });
     }
     const out = await client.chat({
       model: input.model_id,
-      messages: [{ role: "user", content: "Trả lời đúng một từ: OK" }],
+      messages:
+        input.kind === "image"
+          ? [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "Ảnh này có hình chữ nhật màu gì? Trả lời một từ." },
+                  { type: "image_url", image_url: { url: `data:image/png;base64,${TEST_IMAGE_PNG_BASE64}` } },
+                ],
+              },
+            ]
+          : [{ role: "user", content: "Trả lời đúng một từ: OK" }],
       maxTokens: 16,
       temperature: 0,
     });

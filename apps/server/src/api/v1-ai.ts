@@ -14,12 +14,17 @@ import {
   clarificationResultSchema,
   clarificationSchema,
   jobSchema,
+  ocrCorrectionResultSchema,
+  ocrCorrectionSchema,
+  ocrRunSchema,
   paginationSchema,
+  sourceDetailSchema,
   undoResultSchema,
 } from "@personalass/contracts";
 import { transaction } from "../db/open.js";
 import * as aiConfig from "../domain/ai-config.js";
 import type { AiDeps } from "../domain/ai-config.js";
+import { correctOcr, listOcrRuns, sourcesOf } from "../domain/ocr.js";
 import { OWNER_ID, decodeCursor, idempotent, pageRows, parse, type Ctx, type Row } from "../domain/core.js";
 import { answerClarification, listOpenClarifications, undoActionGroup } from "../domain/proposals.js";
 import { getJob, reprocessMemo } from "../jobs/worker.js";
@@ -104,6 +109,29 @@ export function registerAiRoutes(app: FastifyInstance, deps: V1Deps & { ai: AiDe
     const job = tx(ctx, () => reprocessMemo(ctx, idOf(req)));
     wake();
     return reply.code(202).send(job);
+  });
+
+  /* ---- M3: OCR corrections and sources ---- */
+  ops.push({ method: "GET", path: "/api/v1/attachments/:id/ocr-runs", summary: "Lịch sử chữ đọc từ ảnh (AI và bản sửa của bạn), mới nhất trước", response: z.object({ items: z.array(ocrRunSchema) }), status: 200 });
+  app.get("/api/v1/attachments/:id/ocr-runs", async (req) => ({ items: listOcrRuns(ctxOf(req), idOf(req)) }));
+
+  ops.push({ method: "POST", path: "/api/v1/attachments/:id/ocr-corrections", summary: "Sửa chữ đọc từ ảnh: tạo bản mới do bạn viết, tùy chọn xử lý lại memo", request: ocrCorrectionSchema, response: ocrCorrectionResultSchema, status: 201 });
+  app.post("/api/v1/attachments/:id/ocr-corrections", async (req, reply) => {
+    const ctx = ctxOf(req);
+    const input = parse(ocrCorrectionSchema, req.body);
+    const id = idOf(req);
+    const out = idempotent(ctx, idemKey(req), `POST /attachments/${id}/ocr-corrections`, input, () => ({
+      status: 201,
+      body: correctOcr(ctx, id, input),
+    }));
+    wake();
+    return reply.code(out.status).send(out.body);
+  });
+
+  ops.push({ method: "GET", path: "/api/v1/sources", summary: "Nguồn của một mục, tới đúng bản OCR đã trích", response: z.object({ items: z.array(sourceDetailSchema) }), status: 200 });
+  app.get("/api/v1/sources", async (req) => {
+    const q = parse(z.object({ entity_type: z.string().min(1).max(40), entity_id: z.uuid() }), req.query);
+    return { items: sourcesOf(ctxOf(req), q.entity_type, q.entity_id) };
   });
 
   /* ---- clarifications ---- */

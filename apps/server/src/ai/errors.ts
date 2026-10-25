@@ -26,7 +26,11 @@ export const isRetryable = (code: ProviderErrorCode): boolean =>
 
 /** Errors that need the owner to fix the configuration; never spam retries. */
 export const needsConfiguration = (code: ProviderErrorCode): boolean =>
-  code === "auth" || code === "model_not_found" || code === "not_configured" || code === "blocked_by_policy";
+  code === "auth" ||
+  code === "model_not_found" ||
+  code === "not_configured" ||
+  code === "blocked_by_policy" ||
+  code === "no_image_input";
 
 const KEY_PATTERNS = [/sk-[A-Za-z0-9_\-]{6,}/g, /Bearer\s+\S+/gi, /key[=:]\s*\S+/gi];
 

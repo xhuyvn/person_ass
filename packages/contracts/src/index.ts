@@ -252,6 +252,36 @@ export const ocrCorrectionSchema = z.object({
 });
 export type OcrCorrection = z.infer<typeof ocrCorrectionSchema>;
 
+export const ocrCorrectionResultSchema = z.object({
+  run: ocrRunSchema,
+  /** The reprocess job when one was queued. */
+  job: z.lazy(() => jobSchema).nullable(),
+  /**
+   * queued = a new job reads the corrected text; busy = the memo is being
+   * processed right now, reprocess later; skipped = not requested, or the
+   * image belongs to an older revision of the memo.
+   */
+  reprocess: z.enum(["queued", "busy", "skipped"]),
+});
+export type OcrCorrectionResult = z.infer<typeof ocrCorrectionResultSchema>;
+
+/** GET /sources?entity_type=&entity_id=: where an item came from, down to the OCR run it quoted. */
+export const sourceDetailSchema = z.object({
+  memo_id: z.string(),
+  memo_revision_id: z.string(),
+  quote: z.string().nullable(),
+  field_path: z.string().nullable(),
+  attachment_id: z.string().nullable(),
+  /** 0-based image position in the memo. */
+  attachment_position: z.number().int().nullable(),
+  /** The exact run quoted, even if a newer correction exists. */
+  ocr_run: ocrRunSchema.nullable(),
+  /** False when the image text was corrected after this item was created. */
+  ocr_run_is_latest: z.boolean().nullable(),
+  created_at: z.string(),
+});
+export type SourceDetail = z.infer<typeof sourceDetailSchema>;
+
 export const memoReceiptSchema = z.object({
   memo_id: uuid,
   revision_id: uuid,
@@ -306,6 +336,8 @@ export type MemoDetail = z.infer<typeof memoDetailSchema>;
 export const sourceRefSchema = z.object({
   memo_revision_id: uuid,
   quote: z.string().max(2000).optional(),
+  /** M3: the quote comes from this OCR run of one of the revision's images. */
+  ocr_run_id: uuid.optional(),
 });
 export type SourceRef = z.infer<typeof sourceRefSchema>;
 
