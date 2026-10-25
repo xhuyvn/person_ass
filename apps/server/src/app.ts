@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import { randomUUID } from "node:crypto";
 import type { ApiErrorCode } from "@personalass/contracts";
 import { apiErrorSchema, apiErrorStatusByCode } from "@personalass/contracts";
@@ -12,6 +13,7 @@ import { buildOpenApi, registerV1Routes } from "./api/v1.js";
 import type { Clock } from "./domain/core.js";
 import type { AiDeps } from "./domain/ai-config.js";
 import { policyTransport } from "./ai/net-policy.js";
+import { attachmentLimits } from "./storage/attachments.js";
 import { appVersion } from "./version.js";
 import { createLogger, type Logger } from "./logger.js";
 
@@ -188,6 +190,11 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
 
+  // Image uploads: one file per request, capped at the per-image byte limit.
+  await app.register(multipart, {
+    limits: { fileSize: deps.config.MAX_UPLOAD_BYTES, files: 1, fields: 2, parts: 4, fieldSize: 1024 },
+  });
+
   app.addHook("onSend", async (request, reply, payload) => {
     const correlationId = (request as FastifyRequest & { correlationId?: string })
       .correlationId;
@@ -265,6 +272,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     db: deps.db,
     clock: deps.clock ?? (() => new Date()),
     ai: deps.ai ?? { secrets: null, transport: policyTransport },
+    attachments: { paths: deps.paths, limits: attachmentLimits(deps.config) },
     onJobQueued: deps.onJobQueued,
   });
   const openapi = buildOpenApi(ops, appVersion());

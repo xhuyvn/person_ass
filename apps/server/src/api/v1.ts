@@ -34,11 +34,14 @@ import {
 import { createReminderRule, getReminderRule, listReminderRules } from "../domain/reminders.js";
 import type { AiDeps } from "../domain/ai-config.js";
 import { registerAiRoutes } from "./v1-ai.js";
+import { registerAttachmentRoutes, type AttachmentDeps } from "./v1-attachments.js";
 
 export type V1Deps = {
   db: Db;
   clock: Clock;
   ai: AiDeps;
+  /** Image storage paths and limits (M3). */
+  attachments: AttachmentDeps;
   /** Called after a job was queued so the worker picks it up without waiting for its poll. */
   onJobQueued?: () => void;
 };
@@ -100,7 +103,7 @@ export async function registerV1Routes(app: FastifyInstance, deps: V1Deps): Prom
     const ctx = ctxOf(req);
     const input = parse(memoCreateSchema, req.body);
     const out = idempotent(ctx, idemKey(req), "POST /memos", input, () => {
-      const r = createMemo(ctx, input);
+      const r = createMemo(ctx, input, { maxImages: deps.attachments.limits.maxImages });
       return { status: r.created ? 201 : 200, body: r.receipt };
     });
     if (out.body.job_id) deps.onJobQueued?.();
@@ -235,5 +238,6 @@ export async function registerV1Routes(app: FastifyInstance, deps: V1Deps): Prom
   });
 
   registerAiRoutes(app, deps, ops);
+  registerAttachmentRoutes(app, deps, ops);
   return ops;
 }
