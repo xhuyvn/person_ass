@@ -1,5 +1,26 @@
 import {
+  aiConnectionListSchema,
+  aiConnectionSchema,
+  aiConnectionTestResultSchema,
+  aiModelListSchema,
+  aiRoleListSchema,
   apiErrorSchema,
+  clarificationResultSchema,
+  jobSchema,
+  memoDetailSchema,
+  undoResultSchema,
+  type AiConnection,
+  type AiConnectionCreate,
+  type AiConnectionPatch,
+  type AiConnectionTestResult,
+  type AiModelList,
+  type AiRoleBinding,
+  type AiRoleBindingInput,
+  type ClarificationAnswer,
+  type ClarificationResult,
+  type Job,
+  type MemoDetail,
+  type UndoResult,
   appointmentSchema,
   memoReceiptSchema,
   noteSchema,
@@ -58,9 +79,11 @@ export function createApi(options: ApiOptions) {
     schema: S,
     body?: unknown,
     idempotencyKey?: string,
+    /** Longer deadline for calls that wait on a provider (connection test). */
+    timeoutOverrideMs?: number,
   ): Promise<z.output<S>> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutOverrideMs ?? timeoutMs);
     let response: Response;
     try {
       response = await fetchImpl(`${base}/api/v1${path}`, {
@@ -103,18 +126,47 @@ export function createApi(options: ApiOptions) {
   const noteGroup = paginationSchema(noteSchema);
   const apptPage = paginationSchema(appointmentSchema);
   const notifPage = paginationSchema(notificationSchema);
+  const memoPage = paginationSchema(memoDetailSchema);
 
   return {
-    createMemo: (text: string, capturedAt: string, timezone: string, clientRequestId: string): Promise<MemoReceipt> =>
+    createMemo: (
+      text: string,
+      capturedAt: string,
+      timezone: string,
+      clientRequestId: string,
+      opts: { process?: boolean; privacy?: "default" | "local_only" } = {},
+    ): Promise<MemoReceipt> =>
       request("POST", "/memos", memoReceiptSchema, {
         client_request_id: clientRequestId,
         text,
         captured_at: capturedAt,
         timezone,
-        // The M1 screen creates tasks from a memo by hand and does not show
-        // AI results yet; AI processing is switched on with the M2 UI.
-        process: false,
+        process: opts.process ?? true,
+        privacy: opts.privacy ?? "default",
       }),
+    listMemos: (limit = 10): Promise<MemoDetail[]> =>
+      request("GET", `/memos?limit=${limit}`, memoPage).then((p) => p.items),
+    getMemo: (id: string): Promise<MemoDetail> => request("GET", `/memos/${id}`, memoDetailSchema),
+    reprocessMemo: (id: string): Promise<Job> => request("POST", `/memos/${id}/reprocess`, jobSchema, {}),
+    answerClarification: (id: string, expectedVersion: number, answer: ClarificationAnswer["answer"]): Promise<ClarificationResult> =>
+      request("POST", `/clarifications/${id}/answer`, clarificationResultSchema, { expected_version: expectedVersion, answer }),
+    undoActionGroup: (id: string): Promise<UndoResult> => request("POST", `/action-groups/${id}/undo`, undoResultSchema, {}),
+
+    /* ---- AI settings (the key is write-only: sent here, never read back) ---- */
+    listConnections: (): Promise<AiConnection[]> =>
+      request("GET", "/ai/connections", aiConnectionListSchema).then((p) => p.items),
+    createConnection: (input: AiConnectionCreate): Promise<AiConnection> =>
+      request("POST", "/ai/connections", aiConnectionSchema, input, key()),
+    patchConnection: (id: string, input: AiConnectionPatch): Promise<AiConnection> =>
+      request("PATCH", `/ai/connections/${id}`, aiConnectionSchema, input),
+    testConnection: (id: string, kind: "metadata" | "text", modelId?: string): Promise<AiConnectionTestResult> =>
+      request("POST", `/ai/connections/${id}/test`, aiConnectionTestResultSchema, { kind, ...(modelId ? { model_id: modelId } : {}) }, undefined, 300000),
+    listModels: (id: string): Promise<AiModelList> =>
+      request("GET", `/ai/connections/${id}/models`, aiModelListSchema, undefined, undefined, 60000),
+    listRoles: (): Promise<AiRoleBinding[]> =>
+      request("GET", "/ai/roles", aiRoleListSchema).then((p) => p.items),
+    putRoles: (roles: Array<Partial<AiRoleBindingInput> & Pick<AiRoleBindingInput, "role" | "connection_id" | "model_id">>): Promise<AiRoleBinding[]> =>
+      request("PUT", "/ai/roles", aiRoleListSchema, { roles }).then((p) => p.items),
     listTasks: (): Promise<Task[]> => request("GET", "/tasks?limit=100", taskPage).then((p) => p.items),
     createTask: (input: { title: string; due_date?: string; source?: { memo_revision_id: string; quote?: string } }): Promise<Task> =>
       request("POST", "/tasks", taskSchema, input, key()),

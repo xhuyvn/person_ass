@@ -488,6 +488,7 @@ export const aiConnectionSchema = z.object({
   updated_at: z.string(),
 });
 export type AiConnection = z.infer<typeof aiConnectionSchema>;
+export const aiConnectionListSchema = z.object({ items: z.array(aiConnectionSchema) });
 
 export const PROVIDER_ERROR_CODES = [
   "auth",
@@ -571,6 +572,7 @@ export const aiRoleBindingSchema = z.object({
   updated_at: z.string(),
 });
 export type AiRoleBinding = z.infer<typeof aiRoleBindingSchema>;
+export const aiRoleListSchema = z.object({ items: z.array(aiRoleBindingSchema) });
 
 /* ---- jobs ---- */
 

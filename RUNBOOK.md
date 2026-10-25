@@ -86,7 +86,9 @@ API key của provider được mã hóa AES-256-GCM bằng master key nằm **n
 - **Sao lưu master key riêng**, không để chung với backup dữ liệu. Mất master key thì phải nhập lại API key cho từng kết nối; không có cách giải mã giả.
 - Nếu master key lỗi ở local mode, app vẫn chạy (log `master_key_unavailable`) nhưng không lưu/dùng được API key.
 
-## Cấu hình AI (M2, qua API — UI sẽ có sau)
+## Cấu hình AI (M2)
+
+Trên web: trang chính → **Cài đặt AI** (`/settings`): thêm kết nối, Test / Test text, Tải model hoặc nhập model id, gán vai trò “Xử lý thông tin” và dự phòng. Tương đương qua API:
 
 ```powershell
 # 1) Thêm kết nối (key chỉ gửi khi ghi; GET không bao giờ trả key)
@@ -100,7 +102,7 @@ curl.exe -X PUT http://127.0.0.1:4310/api/v1/ai/roles -H "content-type: applicat
 - OpenRouter/Ollama Cloud bắt buộc https. http chỉ cho địa chỉ loopback/LAN (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7); địa chỉ link-local/metadata luôn bị chặn; không đi theo redirect.
 - `privacy_scope` do bạn khai báo: memo `privacy: "local_only"` chỉ được gửi tới kết nối `local`. Fallback từ local sang cloud chỉ khi `allow_cloud: true`.
 - Memo lưu trước, job xử lý sau. Không có cấu hình hoặc key sai → job `waiting_configuration`, tự chạy lại khi sửa kết nối/role. Provider offline/429 → `retry_wait` (tối đa 3 lần). Xem `GET /api/v1/jobs/:id`.
-- Màn web M1 hiện gửi memo với `process: false` (chưa hiển thị kết quả AI); gọi API trực tiếp để thử pipeline AI.
+- Trang chính: ô “Để AI tạo việc/lịch/ghi chú từ memo” (mặc định bật) và “Chỉ xử lý cục bộ”. Mục **Memo gần đây** hiện trạng thái job, mục AI đã áp dụng (nút Hoàn tác), câu hỏi làm rõ (Lưu / Áp dụng / Xác nhận / Bỏ qua) và nút Xử lý lại.
 
 ## Cấu trúc repo
 
@@ -120,4 +122,4 @@ docs/            đặc tả thiết kế (không sửa khi code)
 
 ## Điều chưa có
 
-Chưa có UI cấu hình AI/làm rõ/hoàn tác (API đã có ở M2), chưa có OCR/upload ảnh (M3), auth (M6), Docker (M6). Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.
+Chưa có OCR/upload ảnh (M3), people/project/search (M4), launcher + backup (M5), auth (M6), Docker (M6). Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.
