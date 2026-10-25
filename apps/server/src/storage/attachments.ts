@@ -259,7 +259,7 @@ export function attachmentsOfRevision(ctx: Ctx, revisionId: string): AttachmentR
 }
 
 /** Read the derived (EXIF-free, downscaled JPEG) bytes; path resolved under paths.attachmentsDerived with a traversal check. */
-export function readDerivedImage(paths: AppPaths, a: Pick<AttachmentRow, "derived_path">): Buffer {
+export function readDerivedImage(paths: Pick<AppPaths, "attachmentsDerived">, a: Pick<AttachmentRow, "derived_path">): Buffer {
   return fs.readFileSync(resolveInside(paths.attachmentsDerived, a.derived_path));
 }
 

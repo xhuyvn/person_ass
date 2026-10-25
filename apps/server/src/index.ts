@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     purge();
     const purgeTimer = setInterval(purge, 10 * 60_000);
     purgeTimer.unref();
-    const worker = startWorker({ db, clock, ai, logger });
+    const worker = startWorker({ db, clock, ai, logger, paths });
     wakeWorker = worker.wake;
 
     const shutdown = async (signal: string): Promise<void> => {
