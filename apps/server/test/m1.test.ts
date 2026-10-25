@@ -36,11 +36,11 @@ async function harness(root?: string, startMs = T0): Promise<H> {
   const config = {
     ...base,
     dataDir: path.join(dir, "data"),
-    APP_ORIGIN: "http://127.0.0.1:8081",
-    appOrigins: ["http://127.0.0.1:8081"],
+    APP_ORIGIN: "http://127.0.0.1:2311",
+    appOrigins: ["http://127.0.0.1:2311"],
     HOST: "127.0.0.1",
-    PORT: 4310,
-    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 4310),
+    PORT: 2310,
+    allowedHosts: buildDefaultAllowedHosts("127.0.0.1", 2310),
   };
   const paths = { ...dataPaths(config), dbFile: path.join(dir, "db", "p.sqlite") };
   ensureDataDirs(paths);
@@ -70,7 +70,7 @@ async function call(h: H, method: "GET" | "POST" | "PATCH", url: string, body?: 
   const res = await h.app.inject({
     method,
     url,
-    headers: { host: "127.0.0.1:4310", ...headers },
+    headers: { host: "127.0.0.1:2310", ...headers },
     ...(body === undefined ? {} : { payload: body as object }),
   });
   return { status: res.statusCode, body: res.json() as Record<string, any> };
@@ -96,7 +96,7 @@ describe("migration 0003", () => {
     await call(h, "POST", "/api/v1/notes", { title: "giữ lại" });
     const again = runMigrations(h.db, MIGRATIONS_DIR);
     expect(again.applied).toBe(0);
-    expect(again.version).toBe(3);
+    expect(again.version).toBe(4);
     expect(count(h.db, "notes")).toBe(1);
   });
 });
@@ -237,7 +237,9 @@ describe("memos and sources", () => {
     expect(a.status).toBe(201);
     expect(b.status).toBe(200);
     expect(b.body.memo_id).toBe(a.body.memo_id);
-    expect(a.body.job_id).toBeNull();
+    // M2: one job per memo; the repeat returns the same job, never a second one.
+    expect(b.body.job_id).toBe(a.body.job_id);
+    expect(count(h.db, "jobs")).toBe(1);
     expect(count(h.db, "memos")).toBe(1);
     expect(count(h.db, "memo_revisions")).toBe(1);
   });

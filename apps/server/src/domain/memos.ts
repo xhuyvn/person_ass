@@ -13,6 +13,8 @@ import {
   type Row,
 } from "./core.js";
 import { assertValidTimeZone } from "./time.js";
+import { enqueueMemoJob, latestJobForRevision } from "../jobs/worker.js";
+import { memoAiState } from "./proposals.js";
 
 /**
  * Save a memo as raw text + revision 1. `client_request_id` is unique per
@@ -27,13 +29,14 @@ export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt;
     .prepare("SELECT id, current_revision_id FROM memos WHERE owner_id = ? AND client_request_id = ?")
     .get(OWNER_ID, input.client_request_id) as Row | undefined;
   if (existing) {
+    const job = latestJobForRevision(ctx, String(existing.current_revision_id));
     return {
       created: false,
       receipt: {
         memo_id: String(existing.id),
         revision_id: String(existing.current_revision_id),
-        job_id: null,
-        state: "saved",
+        job_id: job?.id ?? null,
+        state: job ? "queued" : "saved",
       },
     };
   }
@@ -43,10 +46,10 @@ export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt;
   const now = nowIso(ctx);
   ctx.db
     .prepare(
-      `INSERT INTO memos (id, owner_id, client_request_id, current_revision_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memos (id, owner_id, client_request_id, current_revision_id, privacy, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(memoId, OWNER_ID, input.client_request_id, revisionId, now, now);
+    .run(memoId, OWNER_ID, input.client_request_id, revisionId, input.privacy, now, now);
   ctx.db
     .prepare(
       `INSERT INTO memo_revisions (id, memo_id, revision_no, raw_text, captured_at, timezone, input_kind,
@@ -57,11 +60,14 @@ export function createMemo(ctx: Ctx, input: MemoCreate): { receipt: MemoReceipt;
     action: "memo.create",
     entityType: "memo",
     entityId: memoId,
-    after: { revision_id: revisionId, input_kind: "text" },
+    after: { revision_id: revisionId, input_kind: "text", privacy: input.privacy },
   });
+  // The memo is durable before any AI work; the job is created in the same
+  // transaction so a crash can never leave a memo without its job (docs/02 §3).
+  const jobId = input.process ? enqueueMemoJob(ctx, revisionId) : null;
   return {
     created: true,
-    receipt: { memo_id: memoId, revision_id: revisionId, job_id: null, state: "saved" },
+    receipt: { memo_id: memoId, revision_id: revisionId, job_id: jobId, state: jobId ? "queued" : "saved" },
   };
 }
 
@@ -103,6 +109,9 @@ export function getMemo(ctx: Ctx, id: string): MemoDetail {
       memo_revision_id: (r.memo_revision_id as string | null) ?? null,
       quote: (r.quote as string | null) ?? null,
     })),
+    privacy: (memo.privacy as MemoDetail["privacy"]) ?? "default",
+    job: memo.current_revision_id ? latestJobForRevision(ctx, String(memo.current_revision_id)) : null,
+    ...memoAiState(ctx, id),
   };
 }
 

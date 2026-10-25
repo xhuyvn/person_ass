@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { checkHealth } from "../src/lib/health.js";
 
-const BASE_URL = "http://127.0.0.1:4310";
+const BASE_URL = "http://127.0.0.1:2310";
 
 const VALID_PAYLOAD = {
   status: "ok",

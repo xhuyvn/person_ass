@@ -13,6 +13,10 @@ export type Ctx = {
   db: Db;
   clock: Clock;
   correlationId?: string;
+  /** Audit attribution for writes made through this context (default user/manual). */
+  actor?: "user" | "ai" | "system";
+  actionGroupId?: string;
+  auditSource?: string;
 };
 
 export class DomainError extends Error {
@@ -76,21 +80,22 @@ export function writeAudit(
   ctx.db
     .prepare(
       `INSERT INTO audit_events
-        (id, owner_id, actor, action, entity_type, entity_id, before_json, after_json,
+        (id, owner_id, actor, action, entity_type, entity_id, action_group_id, before_json, after_json,
          versions_json, source, correlation_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       newId(),
       OWNER_ID,
-      e.actor ?? "user",
+      e.actor ?? ctx.actor ?? "user",
       e.action,
       e.entityType,
       e.entityId,
+      ctx.actionGroupId ?? null,
       e.before === undefined ? null : JSON.stringify(e.before),
       e.after === undefined ? null : JSON.stringify(e.after),
       e.versions === undefined ? null : JSON.stringify(e.versions),
-      "manual",
+      ctx.auditSource ?? "manual",
       ctx.correlationId ?? null,
       now,
       now,

@@ -8,9 +8,9 @@ import { z } from "zod";
 export const envSchema = z.object({
   APP_MODE: z.enum(["local", "server"]).default("local"),
   HOST: z.string().min(1).default("127.0.0.1"),
-  PORT: z.coerce.number().int().min(1).max(65535).default(4310),
+  PORT: z.coerce.number().int().min(1).max(65535).default(2310),
   DATA_DIR: z.string().min(1).default("./.data"),
-  APP_ORIGIN: z.string().min(1).default("http://127.0.0.1:8081"),
+  APP_ORIGIN: z.string().min(1).default("http://127.0.0.1:2311,http://localhost:2311"),
   /**
    * Optional operator extension of the Host allowlist (comma separated).
    * Entries are ADDED to the default loopback allowlist, never a wildcard.
@@ -116,8 +116,8 @@ function isWildcardBind(value: string): boolean {
  * and without the configured PORT, plus the configured HOST when it is a
  * concrete (non-wildcard) address the server binds to.
  *
- * Example for PORT=4310:
- *   ["127.0.0.1:4310", "localhost:4310", "[::1]:4310", "127.0.0.1", "localhost", "[::1]"]
+ * Example for PORT=2310:
+ *   ["127.0.0.1:2310", "localhost:2310", "[::1]:2310", "127.0.0.1", "localhost", "[::1]"]
  */
 export function buildDefaultAllowedHosts(host: string, port: number): string[] {
   const names = new Set<string>(LOOPBACK_HOSTS);
@@ -274,7 +274,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     ...parsed,
     dataDir,
-    appOrigins: appOrigins.length > 0 ? appOrigins : ["http://127.0.0.1:8081"],
+    appOrigins: appOrigins.length > 0 ? appOrigins : ["http://127.0.0.1:2311"],
     trustProxy: parsed.TRUST_PROXY === "true",
     enableDebugAi: parsed.ENABLE_DEBUG_AI === "true",
     allowedHosts: resolveAllowedHosts(parsed),

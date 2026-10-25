@@ -32,10 +32,18 @@ import {
   snoozeNotification,
 } from "../domain/notifications.js";
 import { createReminderRule, getReminderRule, listReminderRules } from "../domain/reminders.js";
+import type { AiDeps } from "../domain/ai-config.js";
+import { registerAiRoutes } from "./v1-ai.js";
 
-export type V1Deps = { db: Db; clock: Clock };
+export type V1Deps = {
+  db: Db;
+  clock: Clock;
+  ai: AiDeps;
+  /** Called after a job was queued so the worker picks it up without waiting for its poll. */
+  onJobQueued?: () => void;
+};
 
-type OpenApiOp = {
+export type OpenApiOp = {
   method: string;
   path: string;
   summary: string;
@@ -87,7 +95,7 @@ export async function registerV1Routes(app: FastifyInstance, deps: V1Deps): Prom
   const page = <T extends z.ZodType>(item: T) => paginationSchema(item);
 
   /* ---- memos ---- */
-  ops.push({ method: "POST", path: "/api/v1/memos", summary: "Lưu memo (chưa xử lý AI)", request: memoCreateSchema, response: memoReceiptSchema, status: 201 });
+  ops.push({ method: "POST", path: "/api/v1/memos", summary: "Lưu memo bền vững, tạo job xử lý AI (202-style receipt)", request: memoCreateSchema, response: memoReceiptSchema, status: 201 });
   app.post("/api/v1/memos", async (req, reply) => {
     const ctx = ctxOf(req);
     const input = parse(memoCreateSchema, req.body);
@@ -95,6 +103,7 @@ export async function registerV1Routes(app: FastifyInstance, deps: V1Deps): Prom
       const r = createMemo(ctx, input);
       return { status: r.created ? 201 : 200, body: r.receipt };
     });
+    if (out.body.job_id) deps.onJobQueued?.();
     return reply.code(out.status).send(out.body);
   });
   ops.push({ method: "GET", path: "/api/v1/memos", summary: "Danh sách memo", response: page(memoDetailSchema), status: 200 });
@@ -225,5 +234,6 @@ export async function registerV1Routes(app: FastifyInstance, deps: V1Deps): Prom
     return snoozeNotification(ctxOf(req), idOf(req), input.minutes);
   });
 
+  registerAiRoutes(app, deps, ops);
   return ops;
 }

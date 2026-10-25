@@ -20,6 +20,7 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="index" options={{ title: "PersonalAss" }} />
+        <Stack.Screen name="settings" options={{ title: "Cài đặt AI" }} />
         <Stack.Screen name="status" options={{ title: "Trạng thái" }} />
         <Stack.Screen name="about" options={{ title: "Giới thiệu" }} />
       </Stack>

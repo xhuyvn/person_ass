@@ -7,7 +7,7 @@
     1. Resolve the repository root.
     2. Check that node and npm are available.
     3. Create .env from .env.example when missing.
-    4. Resolve the port (PORT env var, then PORT in .env, then 4310).
+    4. Resolve the port (PORT env var, then PORT in .env, then 2310).
     5. Refuse to start when the port is held by a foreign process.
     6. Run database migrations.
     7. Build and start the backend, then wait for /health/ready (HTTP 200).
@@ -65,7 +65,7 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 # 4. Resolve the port --------------------------------------------------------
-# Priority: the PORT environment variable, then PORT= in .env, then 4310.
+# Priority: the PORT environment variable, then PORT= in .env, then 2310.
 function Get-DotEnvValue([string]$File, [string]$Key) {
   if (-not (Test-Path $File)) { return $null }
   foreach ($Line in (Get-Content -LiteralPath $File -ErrorAction SilentlyContinue)) {
@@ -97,7 +97,7 @@ if ($EnvPort -and $EnvPort.Trim().Length -gt 0) {
     $Port = [int]$DotEnvPort
     $PortSource = 'PORT in .env'
   } else {
-    $Port = 4310
+    $Port = 2310
     $PortSource = 'the default value'
   }
 }

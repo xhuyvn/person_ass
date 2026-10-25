@@ -4,7 +4,7 @@
 
 Mục tiêu đầu tiên Windows 11, Node LTS được pin trong repo, package manager lockfile. Coder cung cấp hướng dẫn cài dependency, migrate, start và stop. start-local.ps1 chạy backend độc lập tab, chờ readiness rồi mở browser; PID/port lock chống hai instance. stop-local.ps1 graceful shutdown. Autostart Task Scheduler là tùy chọn, có hướng dẫn bật/tắt rõ, không tự sửa hệ điều hành.
 
-Bản build web do backend phục vụ cùng origin, ví dụ http://127.0.0.1:4310. Dev Expo có thể khác port với CORS allowlist chính xác. Backend bind loopback mặc định. Browser không gọi Ollama trực tiếp.
+Bản build web do backend phục vụ cùng origin, ví dụ http://127.0.0.1:2310. Dev Expo có thể khác port với CORS allowlist chính xác. Backend bind loopback mặc định. Browser không gọi Ollama trực tiếp.
 
 Không có login trong loopback mode nhưng vẫn kiểm Host/Origin, chỉ JSON hoặc multipart hợp lệ, mutation cần CSRF token/session local bootstrap. Không Access-Control-Allow-Origin: *. Chặn DNS rebinding bằng allowed Host chính xác. Chỉ cho bootstrap từ origin app. Khi bind LAN/public, bắt buộc server auth mode, không tự mở port công khai.
 

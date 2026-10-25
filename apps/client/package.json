@@ -4,9 +4,9 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
-    "start": "expo start",
-    "dev": "expo start",
-    "web": "expo start --web",
+    "start": "expo start --port 2311",
+    "dev": "expo start --port 2311",
+    "web": "expo start --web --port 2311",
     "build:web": "expo export --platform web --output-dir dist",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",

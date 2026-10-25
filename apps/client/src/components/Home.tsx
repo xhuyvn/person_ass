@@ -1,17 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-  useColorScheme,
-} from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ScrollView, Text, TextInput, View } from "react-native";
 import { Link } from "expo-router";
-import type { Appointment, Note, Notification, Task } from "@personalass/contracts";
-import { Screen, getTheme, radii, spacing, typography, type Theme } from "@personalass/ui";
-import { ApiClientError, createApi, newUuid } from "../lib/api";
+import type { Appointment, MemoDetail, Note, Notification, Task } from "@personalass/contracts";
+import { Screen } from "@personalass/ui";
+import { newUuid } from "../lib/api";
 import {
   DEFAULT_TIMEZONE,
   formatDate,
@@ -19,50 +11,35 @@ import {
   localDateTimeToIso,
   parseDateInput,
 } from "../lib/format";
+import { describeJob } from "../lib/memo-view";
+import { Btn, Card, Check, errText, useScreenKit, type Msg } from "./kit";
+import { MemoFeed } from "./MemoFeed";
 
 const POLL_MS = 15000;
-
-function readApiBaseUrl(): string {
-  try {
-    const configured = process.env.EXPO_PUBLIC_API_BASE_URL;
-    if (typeof configured === "string" && configured.length > 0) return configured.replace(/\/+$/, "");
-  } catch {
-    // fall through to the local default
-  }
-  return "http://127.0.0.1:4310";
-}
-
-type Msg = { kind: "ok" | "error"; text: string } | null;
-
-function errText(e: unknown): string {
-  if (e instanceof ApiClientError) {
-    const fields = e.fieldErrors ? Object.entries(e.fieldErrors).map(([k, v]) => `${k}: ${v}`).join("; ") : "";
-    return fields ? `${e.message} (${fields})` : e.message;
-  }
-  return "Có lỗi không mong đợi.";
-}
+/** Faster refresh while a memo job is queued/running so results show up quickly. */
+const ACTIVE_POLL_MS = 3000;
 
 export function Home() {
-  const scheme = useColorScheme();
-  const theme = useMemo(() => getTheme(scheme === "dark" ? "dark" : "light"), [scheme]);
-  const api = useMemo(() => createApi({ baseUrl: readApiBaseUrl() }), []);
-  const s = useMemo(() => makeStyles(theme), [theme]);
+  const { theme, api, s } = useScreenKit();
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [appts, setAppts] = useState<Appointment[]>([]);
   const [notifs, setNotifs] = useState<Notification[]>([]);
+  const [memos, setMemos] = useState<MemoDetail[]>([]);
   const [msg, setMsg] = useState<Msg>(null);
   const [offline, setOffline] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [t, n, a, no] = await Promise.all([
+      const [t, n, a, no, me] = await Promise.all([
         api.listTasks(),
         api.listNotes(),
         api.listAppointments(),
         api.listNotifications(false),
+        api.listMemos(10),
       ]);
+      setMemos(me);
       setTasks(t);
       setNotes(n);
       setAppts(a);
@@ -89,6 +66,14 @@ export function Home() {
     return () => clearInterval(timer);
   }, [refresh, refreshNotifs]);
 
+  // While a memo is being processed, refresh everything (new tasks, questions).
+  const processing = memos.some((m) => describeJob(m.job).active);
+  useEffect(() => {
+    if (!processing) return;
+    const timer = setInterval(() => void refresh(), ACTIVE_POLL_MS);
+    return () => clearInterval(timer);
+  }, [processing, refresh]);
+
   async function run(action: () => Promise<unknown>, okText: string): Promise<boolean> {
     try {
       await action();
@@ -106,14 +91,19 @@ export function Home() {
   const memoRequestId = useRef(newUuid());
   const [lastMemo, setLastMemo] = useState<{ revisionId: string; text: string } | null>(null);
   const [attach, setAttach] = useState(true);
+  const [useAi, setUseAi] = useState(true);
+  const [localOnly, setLocalOnly] = useState(false);
 
   async function saveMemo() {
     const text = memoText.trim();
     if (!text) return setMsg({ kind: "error", text: "Nhập nội dung memo." });
     const ok = await run(async () => {
-      const receipt = await api.createMemo(text, new Date().toISOString(), DEFAULT_TIMEZONE, memoRequestId.current);
+      const receipt = await api.createMemo(text, new Date().toISOString(), DEFAULT_TIMEZONE, memoRequestId.current, {
+        process: useAi,
+        privacy: localOnly ? "local_only" : "default",
+      });
       setLastMemo({ revisionId: receipt.revision_id, text });
-    }, "Đã lưu memo.");
+    }, useAi ? "Đã lưu memo; AI đang xử lý, kết quả hiện ở mục Memo gần đây." : "Đã lưu memo.");
     if (ok) {
       memoRequestId.current = newUuid();
       setMemoText("");
@@ -180,6 +170,9 @@ export function Home() {
     }
   }
 
+  const titleOf = (id: string | null): string | null =>
+    id ? (appts.find((a) => a.id === id)?.title ?? tasks.find((t) => t.id === id)?.title ?? null) : null;
+
   const unread = notifs.filter((n) => n.state !== "acknowledged");
 
   return (
@@ -187,9 +180,14 @@ export function Home() {
       <ScrollView contentContainerStyle={s.page}>
         <View style={s.headerRow}>
           <Text style={s.title}>PersonalAss</Text>
-          <Link href="/status" style={s.link}>
-            Trạng thái máy chủ
-          </Link>
+          <View style={s.links}>
+            <Link href="/settings" style={s.link}>
+              Cài đặt AI
+            </Link>
+            <Link href="/status" style={s.link}>
+              Trạng thái máy chủ
+            </Link>
+          </View>
         </View>
 
         {offline ? (
@@ -238,17 +236,23 @@ export function Home() {
             onChangeText={setMemoText}
             accessibilityLabel="Nội dung memo"
           />
-          <Btn s={s} label="Lưu memo" onPress={() => void saveMemo()} />
-          <Text style={s.muted}>Memo được lưu nguyên văn. Chưa có AI nên chưa tự tạo việc/lịch; hãy tạo bên dưới.</Text>
+          <Check s={s} checked={useAi} onChange={setUseAi} label="Để AI tạo việc/lịch/ghi chú từ memo" />
+          {useAi ? <Check s={s} checked={localOnly} onChange={setLocalOnly} label="Chỉ xử lý cục bộ (không gửi lên cloud)" /> : null}
+          <Btn s={s} label="Lưu memo" onPress={() => void saveMemo()} testID="save-memo" />
+          <Text style={s.muted}>
+            Memo luôn được lưu nguyên văn trước. AI chỉ tự áp dụng phần rõ ràng; phần chưa chắc sẽ hỏi bạn ở mục bên dưới, và mọi thay đổi của AI đều hoàn tác được.
+          </Text>
+        </Card>
+
+        <Card theme={theme} title="Memo gần đây" testID="memo-feed">
+          <MemoFeed memos={memos} api={api} run={run} s={s} theme={theme} titleOf={titleOf} />
         </Card>
 
         <Card theme={theme} title={`Việc (${tasks.length})`}>
           <TextInput style={s.input} placeholder="Tên việc" placeholderTextColor={theme.colors.textMuted} value={taskTitle} onChangeText={setTaskTitle} accessibilityLabel="Tên việc" />
           <TextInput style={s.input} placeholder="Hạn (dd/mm/yyyy, để trống nếu không có)" placeholderTextColor={theme.colors.textMuted} value={taskDue} onChangeText={setTaskDue} accessibilityLabel="Hạn việc" />
           {lastMemo ? (
-            <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: attach }} onPress={() => setAttach(!attach)}>
-              <Text style={s.muted}>{attach ? "☑" : "☐"} Gắn nguồn từ memo vừa lưu</Text>
-            </Pressable>
+            <Check s={s} checked={attach} onChange={setAttach} label="Gắn nguồn từ memo vừa lưu" />
           ) : null}
           <Btn s={s} label="Thêm việc" onPress={() => void addTask()} />
           {tasks.map((t) => (
@@ -301,60 +305,3 @@ export function Home() {
   );
 }
 
-function Card({ theme, title, children }: { theme: Theme; title: string; children: React.ReactNode }) {
-  return (
-    <View style={{ backgroundColor: theme.colors.surface, borderColor: theme.colors.border, borderWidth: 1, borderRadius: radii.md, padding: spacing.lg, gap: spacing.md }}>
-      <Text style={{ color: theme.colors.text, fontSize: typography.heading, fontWeight: "700" }}>{title}</Text>
-      {children}
-    </View>
-  );
-}
-
-function Btn({ s, label, onPress, secondary }: { s: ReturnType<typeof makeStyles>; label: string; onPress: () => void; secondary?: boolean }) {
-  return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [s.btn, secondary ? s.btnSecondary : null, { opacity: pressed ? 0.75 : 1 }]}>
-      <Text style={[s.btnText, secondary ? s.btnTextSecondary : null]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function makeStyles(t: Theme) {
-  return StyleSheet.create({
-    page: { padding: spacing.lg, gap: spacing.lg, maxWidth: 760, width: "100%", alignSelf: "center" },
-    headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-    title: { color: t.colors.text, fontSize: typography.title, fontWeight: "700" },
-    link: { color: t.colors.primary, fontSize: typography.small },
-    offline: { color: t.colors.warning, fontSize: typography.body, fontWeight: "600" },
-    okMsg: { color: t.colors.success, fontSize: typography.body, fontWeight: "600" },
-    errMsg: { color: t.colors.danger, fontSize: typography.body, fontWeight: "600" },
-    muted: { color: t.colors.textMuted, fontSize: typography.small },
-    mutedText: { color: t.colors.textMuted },
-    done: { textDecorationLine: "line-through", color: t.colors.textMuted },
-    input: {
-      borderWidth: 1,
-      borderColor: t.colors.border,
-      borderRadius: radii.sm,
-      padding: spacing.md,
-      color: t.colors.text,
-      fontSize: typography.body,
-      backgroundColor: t.colors.background,
-    },
-    multiline: { minHeight: 80, textAlignVertical: "top" },
-    item: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: spacing.md,
-      paddingVertical: spacing.sm,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: t.colors.border,
-    },
-    itemMain: { flex: 1, gap: 2 },
-    itemTitle: { color: t.colors.text, fontSize: typography.body, fontWeight: "600" },
-    actions: { flexDirection: "row", gap: spacing.sm },
-    btn: { backgroundColor: t.colors.primary, paddingVertical: spacing.sm, paddingHorizontal: spacing.lg, borderRadius: radii.md, alignItems: "center" },
-    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: t.colors.primary },
-    btnText: { color: "#FFFFFF", fontSize: typography.body, fontWeight: "700" },
-    btnTextSecondary: { color: t.colors.primary },
-  });
-}

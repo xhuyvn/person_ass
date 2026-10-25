@@ -52,12 +52,12 @@ function makeConfig(dataDir: string, overrides: Partial<Config> = {}): Config {
   const merged = {
     ...base,
     dataDir,
-    APP_ORIGIN: "http://127.0.0.1:8081",
-    appOrigins: ["http://127.0.0.1:8081"],
+    APP_ORIGIN: "http://127.0.0.1:2311",
+    appOrigins: ["http://127.0.0.1:2311"],
     MAX_UPLOAD_BYTES: 10 * 1024 * 1024,
     // Pinned so the allowlist assertions do not depend on the shell env.
     HOST: "127.0.0.1",
-    PORT: 4310,
+    PORT: 2310,
     ...overrides,
   };
   return {
@@ -190,7 +190,7 @@ describe("GET /health/ready", () => {
     const body = healthReadySchema.parse(response.json());
     expect(body.status).toBe("ok");
     expect(body.checks.database.ok).toBe(true);
-    expect(body.checks.database.migrations_applied).toBe(3);
+    expect(body.checks.database.migrations_applied).toBe(4);
     expect(body.checks.data_dir.ok).toBe(true);
   });
 
@@ -377,11 +377,11 @@ describe("CORS", () => {
     const response = await harness.app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { origin: "http://127.0.0.1:8081" },
+      headers: { origin: "http://127.0.0.1:2311" },
     });
 
     expect(response.headers["access-control-allow-origin"]).toBe(
-      "http://127.0.0.1:8081",
+      "http://127.0.0.1:2311",
     );
   });
 
@@ -473,7 +473,7 @@ describe("Host allowlist (DNS-rebinding protection)", () => {
     const withPort = await harness.app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { host: "127.0.0.1:4310" },
+      headers: { host: "127.0.0.1:2310" },
     });
     expect(withPort.statusCode).toBe(200);
     expect(healthLiveSchema.parse(withPort.json()).status).toBe("ok");
@@ -489,7 +489,7 @@ describe("Host allowlist (DNS-rebinding protection)", () => {
     const localhost = await harness.app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { host: "localhost:4310" },
+      headers: { host: "localhost:2310" },
     });
     expect(localhost.statusCode).toBe(200);
   });
@@ -521,7 +521,7 @@ describe("Host allowlist (DNS-rebinding protection)", () => {
     const response = await harness.app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { host: "attacker.local:4310" },
+      headers: { host: "attacker.local:2310" },
     });
 
     expect(response.statusCode).toBe(403);
@@ -561,16 +561,16 @@ describe("Host allowlist (DNS-rebinding protection)", () => {
   it("extends the allowlist through ALLOWED_HOSTS", async () => {
     const extended = await createApp({
       allowedHosts: [
-        ...buildDefaultAllowedHosts("127.0.0.1", 4310),
+        ...buildDefaultAllowedHosts("127.0.0.1", 2310),
         "localhost:80",
-        "personalass.local:4310",
+        "personalass.local:2310",
       ],
     });
 
     const accepted = await extended.app.inject({
       method: "GET",
       url: "/health/live",
-      headers: { host: "personalass.local:4310" },
+      headers: { host: "personalass.local:2310" },
     });
     expect(accepted.statusCode).toBe(200);
 
@@ -718,12 +718,12 @@ describe("Host allowlist configuration", () => {  it("derives the default allowl
     const config = loadConfig({
       ...process.env,
       HOST: "127.0.0.1",
-      PORT: "4310",
+      PORT: "2310",
     });
 
-    expect(config.allowedHosts).toContain("127.0.0.1:4310");
-    expect(config.allowedHosts).toContain("localhost:4310");
-    expect(config.allowedHosts).toContain("[::1]:4310");
+    expect(config.allowedHosts).toContain("127.0.0.1:2310");
+    expect(config.allowedHosts).toContain("localhost:2310");
+    expect(config.allowedHosts).toContain("[::1]:2310");
     expect(config.allowedHosts).toContain("127.0.0.1");
     expect(config.allowedHosts).toContain("localhost");
     expect(config.allowedHosts).toContain("[::1]");
@@ -734,24 +734,24 @@ describe("Host allowlist configuration", () => {  it("derives the default allowl
     const config = loadConfig({
       ...process.env,
       HOST: "127.0.0.1",
-      PORT: "4310",
-      ALLOWED_HOSTS: "personalass.local:4310, personalass.local",
+      PORT: "2310",
+      ALLOWED_HOSTS: "personalass.local:2310, personalass.local",
     });
 
-    expect(config.allowedHosts).toContain("personalass.local:4310");
+    expect(config.allowedHosts).toContain("personalass.local:2310");
     expect(config.allowedHosts).toContain("personalass.local");
-    expect(config.allowedHosts).toContain("127.0.0.1:4310");
+    expect(config.allowedHosts).toContain("127.0.0.1:2310");
   });
 
   it("never turns the allowlist into a wildcard", () => {
     const config = loadConfig({
       ...process.env,
       HOST: "127.0.0.1",
-      PORT: "4310",
+      PORT: "2310",
       ALLOWED_HOSTS: "*",
     });
 
     expect(config.allowedHosts).not.toContain("*");
-    expect(config.allowedHosts).toContain("127.0.0.1:4310");
+    expect(config.allowedHosts).toContain("127.0.0.1:2310");
   });
 });
