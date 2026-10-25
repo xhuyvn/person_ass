@@ -601,7 +601,10 @@ export function applyProposal(ctx: Ctx, args: ApplyArgs): ApplySummary {
 /* ------------------------------------------------------------------ */
 
 export function toProposalAction(r: Row): ProposalAction {
-  const evidence = JSON.parse(String(r.evidence_json)) as Array<{ quote?: unknown }>;
+  const evidence = JSON.parse(String(r.evidence_json)) as Array<{ quote?: unknown; source_id?: unknown }>;
+  // Evidence from an image names the OCR run it quoted; memo text names the revision.
+  const ocrRunOf = (e: { source_id?: unknown }) =>
+    typeof e.source_id === "string" && e.source_id !== String(r.memo_revision_id) ? e.source_id : null;
   return {
     id: String(r.id),
     proposal_id: String(r.proposal_id),
@@ -611,7 +614,7 @@ export function toProposalAction(r: Row): ProposalAction {
     status: r.status as ProposalActionStatus,
     reason: (r.reason as string | null) ?? null,
     fields: JSON.parse(String(r.fields_json)) as Record<string, unknown>,
-    evidence: evidence.map((e) => ({ quote: String(e.quote ?? "") })),
+    evidence: evidence.map((e) => ({ quote: String(e.quote ?? ""), ocr_run_id: ocrRunOf(e) })),
     result_entity_type: (r.result_entity_type as string | null) ?? null,
     result_entity_id: (r.result_entity_id as string | null) ?? null,
     action_group_id: (r.action_group_id as string | null) ?? null,
