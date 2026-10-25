@@ -143,6 +143,13 @@ describe("memo-view M3 labels", () => {
     expect(describeStatus({ ...base, reason: "superseded" })).toContain("đã thay bằng lần xử lý mới");
     expect(describeAction({ ...base, reason: null }, null)).toContain("Việc");
   });
+  it("never shows a guessed time while the image reading is in doubt", () => {
+    const base: Omit<ProposalAction, "reason" | "status"> = { id: ID, proposal_id: ID, operation: "create", entity_type: "appointment", target_id: null, fields: { title: "Lịch khám", starts_at: "2026-11-12T02:00:00Z" }, evidence: [], result_entity_type: null, result_entity_id: null, action_group_id: null, created_at: "x" };
+    const held = describeAction({ ...base, status: "needs_clarification", reason: "ocr_uncertain" });
+    expect(held).toContain("thời gian chưa rõ");
+    expect(held).not.toContain("12/11");
+    expect(describeAction({ ...base, status: "applied", reason: null })).toContain("12/11/2026");
+  });
   it("points no_image_input at the AI settings", () => {
     const job = { id: ID, kind: "process_memo", memo_revision_id: ID, state: "waiting_configuration", attempt: 0, max_attempts: 3, run_after: "x", error_code: "no_image_input", error_message: "x", created_at: "x", updated_at: "x" } as Job;
     const v = describeJob(job);

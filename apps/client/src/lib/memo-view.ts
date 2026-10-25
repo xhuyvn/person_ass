@@ -90,7 +90,10 @@ export function describeAction(a: ProposalAction, targetTitle?: string | null): 
   if (title) parts.push(title);
   const when = str(f.starts_at) ?? str(f.due_at);
   const date = str(f.due_date) ?? str(f.local_date);
-  if (when) parts.push(formatInstant(when));
+  // A time held for a question (e.g. read with doubt from an image) is a
+  // guess: never show it as if it were the scheduled time.
+  if (a.status === "needs_clarification" && a.reason === "ocr_uncertain" && (when || date)) parts.push("thời gian chưa rõ");
+  else if (when) parts.push(formatInstant(when));
   else if (date) parts.push(formatDate(date));
   else if (a.entity_type === "task" && a.operation === "create") parts.push("không có hạn");
   if (str(f.status)) parts.push(`→ ${String(f.status)}`);

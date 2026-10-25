@@ -145,6 +145,7 @@ type Decision =
 export type OcrEvidenceSource = {
   runId: string;
   imagePosition: number;
+  status: "readable" | "partial" | "unreadable";
   text: string;
   /** Uncertain fragments and uncertain blocks of that run, with any alternatives. */
   uncertain: Array<{ fragment: string; alternatives: string[] }>;
@@ -169,44 +170,33 @@ function sourceOf(rev: RevisionInfo, a: ActionShape) {
 
 const TIME_FIELDS = ["starts_at", "ends_at", "local_date", "due_date", "due_at", "planned_at"] as const;
 
-/** Patterns a day/month of `value` would be written as in Vietnamese text (12/11, 12-11, ngày 12 tháng 11). */
-function dayMonthPatterns(value: string, timeZone: string): RegExp[] {
-  let ymd: string | null = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
-  if (!ymd && !Number.isNaN(Date.parse(value))) {
-    ymd = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value));
-  }
-  if (!ymd) return [];
-  const d = Number(ymd.slice(8, 10));
-  const m = Number(ymd.slice(5, 7));
-  return [
-    new RegExp(`(^|\\D)0?${d}\\s*[/.\\-]\\s*0?${m}(\\D|$)`),
-    new RegExp(`ngày\\s*0?${d}\\s*(tháng|th\\.?)\\s*0?${m}(\\D|$)`),
-  ];
-}
-
 /**
- * A06 gate: a date/time must not be scheduled from a doubtful OCR reading.
- * Doubt = the action cites an image whose OCR has an uncertain fragment with
- * digits, or a proposed date matches an uncertain fragment/alternative of
- * any image of the memo. Uncertainty comes from the stored OCR run, never
- * from the information model's own claim.
+ * A06 gate: a date/time is never scheduled while any image of the memo was
+ * read with doubt. Deliberately conservative: matching the doubtful fragment
+ * against the proposed value missed weekday names, hours, years, "thg",
+ * "1?/11" and more, so ANY uncertainty in a stored OCR run (or a partly
+ * readable image) holds every time field of the memo's actions for the user.
+ * Uncertainty comes from the stored run, never from the information model;
+ * a user correction (no uncertainties) lifts it.
  */
 function ocrTimeDoubt(rev: RevisionInfo, a: ActionShape): { fieldPath: string; question: string } | null {
   if (!rev.ocr || rev.ocr.length === 0) return null;
   const fields = TIME_FIELDS.filter((f) => typeof a.fields[f] === "string" && (a.fields[f] as string).length > 0);
   if (fields.length === 0) return null;
-  const cited = new Set(a.evidence.map((e) => e.source_id));
-  const patterns = fields.flatMap((f) => dayMonthPatterns(String(a.fields[f]), rev.timezone));
   for (const o of rev.ocr) {
-    for (const u of o.uncertain) {
-      const hay = [u.fragment, ...u.alternatives].map(normalizeText).join(" | ");
-      if ((cited.has(o.runId) && /\d/.test(hay)) || patterns.some((p) => p.test(hay))) {
-        const alts = u.alternatives.length > 0 ? ` (có thể là ${u.alternatives.join(" hoặc ")})` : "";
-        return {
-          fieldPath: fields.join(","),
-          question: `Ảnh #${o.imagePosition + 1} ghi «${u.fragment}» chưa rõ${alts}. Bạn xác nhận thời gian đúng?`,
-        };
-      }
+    const u = o.uncertain[0];
+    if (u) {
+      const alts = u.alternatives.length > 0 ? ` (có thể là ${u.alternatives.join(" hoặc ")})` : "";
+      return {
+        fieldPath: fields.join(","),
+        question: `Ảnh #${o.imagePosition + 1} ghi «${u.fragment}» chưa rõ${alts}. Bạn xác nhận thời gian đúng?`,
+      };
+    }
+    if (o.status === "partial") {
+      return {
+        fieldPath: fields.join(","),
+        question: `Ảnh #${o.imagePosition + 1} chỉ đọc được một phần. Bạn xác nhận thời gian đúng (hoặc sửa chữ của ảnh)?`,
+      };
     }
   }
   return null;
@@ -835,7 +825,19 @@ export function answerClarification(ctx: Ctx, id: string, input: ClarificationAn
 
   if (kind === "missing_fields") {
     if (!("fields" in answer)) throw new DomainError("BAD_REQUEST", "Câu hỏi này cần answer.fields.");
-    action.fields = { ...action.fields, ...answer.fields };
+    // The fields the question asked about are dropped first: a value the
+    // model guessed (e.g. from a doubtful OCR date) is never applied just
+    // because the user's answer left that field out.
+    const asked = String(clar.field_path ?? "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    const kept = Object.fromEntries(Object.entries(action.fields).filter(([k]) => !asked.includes(k)));
+    const missing = asked.filter((p) => TIME_FIELDS.includes(p as (typeof TIME_FIELDS)[number]) && !(p in answer.fields));
+    if (actionRow.reason === "ocr_uncertain" && missing.length > 0) {
+      throw new DomainError("BAD_REQUEST", "Cần nhập thời gian đúng.", Object.fromEntries(missing.map((p) => [`answer.fields.${p}`, "Bắt buộc."])));
+    }
+    action.fields = { ...kept, ...answer.fields };
   } else if (kind === "choose_target") {
     if (!("choice" in answer)) throw new DomainError("BAD_REQUEST", "Câu hỏi này cần answer.choice.");
     const options = JSON.parse(String(clar.options_json)) as Array<{ value: string }>;

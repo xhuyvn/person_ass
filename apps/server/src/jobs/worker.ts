@@ -450,6 +450,9 @@ function commitOcrRun(ctx: Ctx, job: Claimed, attachment: AttachmentRow, target:
   return transaction(ctx.db, () => {
     const fence = ctx.db.prepare("SELECT fencing_token, state FROM jobs WHERE id = ?").get(job.id) as Row | undefined;
     if (!fence || Number(fence.fencing_token) !== job.fencingToken || fence.state !== "running") return false;
+    // The user corrected this image while the call was in flight: their run
+    // stays effective; the late AI result is dropped, never stacked on top.
+    if (effectiveOcrRun(ctx, attachment.id) !== null) return true;
     ctx.db
       .prepare(
         `INSERT OR IGNORE INTO ocr_runs (id, owner_id, attachment_id, job_id, author, connection_id, model_id, prompt_version,
@@ -541,7 +544,7 @@ function ocrSourcesOf(ctx: Ctx, attachments: AttachmentRow[]): { prompt: OcrSour
       text: run.text,
       uncertainFragments: uncertain.map((u) => u.fragment),
     });
-    evidence.push({ runId: run.id, imagePosition: position, text: run.text, uncertain });
+    evidence.push({ runId: run.id, imagePosition: position, status: run.status, text: run.text, uncertain });
   }
   return { prompt, evidence };
 }

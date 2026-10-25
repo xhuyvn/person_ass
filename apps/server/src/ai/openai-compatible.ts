@@ -152,7 +152,8 @@ export class OpenAiCompatibleClient {
 }
 
 /** Provider wording for "this model cannot take images" (OpenRouter, Ollama, vLLM-style servers). */
-const IMAGE_REJECTION = /image|vision|multimodal|modalit/i;
+const IMAGE_REJECTION =
+  /((not|n't|no)\s+(support|accept|allow)\w*|unsupported|no endpoints?)[^.]{0,60}(image|vision|multimodal|modalit)|(image|vision|multimodal|modalit)\w*[^.]{0,60}(not\s+(supported|allowed|accepted)|unsupported)/i;
 
 function hasImages(messages: ChatMessage[]): boolean {
   return messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));

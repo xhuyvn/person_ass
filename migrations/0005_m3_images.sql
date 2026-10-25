@@ -44,6 +44,22 @@ BEGIN
   SELECT RAISE(ABORT, 'attachment content is immutable');
 END;
 
+-- Binding happens once: a bound attachment never moves to another revision or position.
+CREATE TRIGGER IF NOT EXISTS attachments_binding_immutable
+BEFORE UPDATE OF memo_revision_id, position ON attachments
+WHEN OLD.memo_revision_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'attachment binding is immutable');
+END;
+
+-- A bound attachment is a memo source and is never deleted (only expired staged uploads are purged).
+CREATE TRIGGER IF NOT EXISTS attachments_bound_no_delete
+BEFORE DELETE ON attachments
+WHEN OLD.memo_revision_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'bound attachments are never deleted');
+END;
+
 -- One row per OCR result, immutable (docs/04 §2). A model result has
 -- author='ai' and a job; a user correction has author='user', no job, and
 -- supersedes the run it corrected. The effective text of an attachment is its
@@ -75,6 +91,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ocr_runs_job_attachment
 
 CREATE TRIGGER IF NOT EXISTS ocr_runs_immutable
 BEFORE UPDATE ON ocr_runs
+BEGIN
+  SELECT RAISE(ABORT, 'ocr_runs are immutable');
+END;
+
+-- Runs are history that source links point at; they are never deleted.
+CREATE TRIGGER IF NOT EXISTS ocr_runs_no_delete
+BEFORE DELETE ON ocr_runs
 BEGIN
   SELECT RAISE(ABORT, 'ocr_runs are immutable');
 END;
