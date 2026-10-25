@@ -1,21 +1,25 @@
 import { randomUUID } from "node:crypto";
 import type { Job, JobState } from "@personalass/contracts";
 import { isRetryable, needsConfiguration, ProviderError } from "../ai/errors.js";
-import { OpenAiCompatibleClient } from "../ai/openai-compatible.js";
+import { buildOcrMessages, buildOcrRepairMessages, loadOcrPrompt, ocrJsonSchema, parseOcrOutput, type OcrImageResult } from "../ai/ocr.js";
+import { OpenAiCompatibleClient, type ChatMessage } from "../ai/openai-compatible.js";
 import {
   buildInformationMessages,
   buildRepairMessages,
   formatCapturedLocal,
   loadInformationPrompt,
   type Candidate,
+  type OcrSource,
   type PromptBundle,
 } from "../ai/prompt.js";
-import { proposalJsonSchema } from "../ai/proposal-schema.js";
+import { proposalJsonSchema, type ProposalEnvelope } from "../ai/proposal-schema.js";
+import type { DataPaths } from "../config.js";
 import { transaction, type Db } from "../db/open.js";
 import { getRole, resolveConnection, type AiDeps } from "../domain/ai-config.js";
 import { DomainError, OWNER_ID, loadSettings, newId, notFound, nowIso, type Clock, type Ctx, type Row } from "../domain/core.js";
-import { applyProposal, parseModelOutput, StaleJobError, type RevisionInfo } from "../domain/proposals.js";
+import { applyProposal, parseModelOutput, StaleJobError, type OcrEvidenceSource, type RevisionInfo } from "../domain/proposals.js";
 import type { Logger } from "../logger.js";
+import { attachmentsOfRevision, effectiveOcrRun, readDerivedImage, type AttachmentRow } from "../storage/attachments.js";
 
 /**
  * Durable job worker (docs/02 §3-4): claim with a conditional update and a
@@ -36,6 +40,9 @@ export type WorkerDeps = {
   logger: Logger;
   workerId?: string;
   prompt?: PromptBundle;
+  ocrPrompt?: PromptBundle;
+  /** Where attachment files live; required to process memos with images. */
+  paths?: Pick<DataPaths, "attachmentsDerived">;
   /** Injectable for tests: jitter source in [0, 1). */
   random?: () => number;
   heartbeatMs?: number;
@@ -98,6 +105,15 @@ export function reprocessMemo(ctx: Ctx, memoId: string): Job {
   if (last && ACTIVE_STATES.has(last.state)) {
     throw new DomainError("CONFLICT", "Memo đang được xử lý; chờ job hiện tại kết thúc.");
   }
+  // A job still waiting for configuration is replaced, not left to wake up
+  // later and process the same revision a second time.
+  const now = nowIso(ctx);
+  ctx.db
+    .prepare(
+      `UPDATE jobs SET state = 'cancelled', error_code = 'superseded', error_message = ?, version = version + 1, updated_at = ?
+       WHERE memo_revision_id = ? AND state = 'waiting_configuration'`,
+    )
+    .run("Đã thay bằng lần xử lý mới.", now, revisionId);
   return getJob(ctx, enqueueMemoJob(ctx, revisionId, last?.id ?? null));
 }
 
@@ -233,15 +249,28 @@ export function loadCandidates(ctx: Ctx, capturedAt: string): Candidate[] {
 
 type Target = { connectionId: string; modelId: string };
 
+const ROLE_LABEL: Record<"information" | "ocr", string> = {
+  information: "xử lý thông tin",
+  ocr: "OCR (đọc ảnh)",
+};
+
 /**
- * Ordered provider targets for the information role, after the privacy rules
- * (docs/04 §6): a local_only memo never reaches a cloud connection, and a
- * local primary only falls back to cloud when allow_cloud is set.
+ * Ordered provider targets for a role, after the privacy rules (docs/04 §6):
+ * a local_only memo (text and images alike) never reaches a cloud
+ * connection, and a local primary only falls back to cloud when allow_cloud
+ * is set.
  */
-function resolveTargets(ctx: Ctx, deps: WorkerDeps, privacy: string): { targets: Target[] } | { error: ProviderError } {
-  const binding = getRole(ctx, "information");
+function resolveTargets(ctx: Ctx, role: "information" | "ocr", privacy: string): { targets: Target[] } | { error: ProviderError } {
+  const binding = getRole(ctx, role);
   if (!binding) {
-    return { error: new ProviderError("not_configured", "Chưa chọn kết nối/model cho vai trò xử lý thông tin.") };
+    return {
+      error: new ProviderError(
+        "not_configured",
+        role === "ocr"
+          ? "Chưa chọn kết nối/model đọc được ảnh cho vai trò OCR."
+          : "Chưa chọn kết nối/model cho vai trò xử lý thông tin.",
+      ),
+    };
   }
   const all: Target[] = [
     { connectionId: binding.connection_id, modelId: binding.model_id },
@@ -261,14 +290,13 @@ function resolveTargets(ctx: Ctx, deps: WorkerDeps, privacy: string): { targets:
     if (i > 0 && primary?.scope === "local" && s.scope === "cloud" && !binding.fallback.allow_cloud) return false;
     return true;
   });
-  void deps;
   if (targets.length === 0) {
     return {
       error: new ProviderError(
         "not_configured",
         privacy === "local_only"
           ? "Memo chỉ xử lý cục bộ nhưng không có kết nối local khả dụng; không gửi lên cloud."
-          : "Không có kết nối AI nào đang bật cho vai trò xử lý thông tin.",
+          : `Không có kết nối AI nào đang bật cho vai trò ${ROLE_LABEL[role]}.`,
       ),
     };
   }
@@ -282,19 +310,20 @@ function recordRun(
   promptVersion: string,
   purpose: "extract" | "repair",
   status: "ok" | "provider_error" | "invalid_output",
-  extra: { errorCode?: string; usage?: unknown; latencyMs?: number | null },
+  extra: { errorCode?: string; usage?: unknown; latencyMs?: number | null; role?: "information" | "ocr" },
 ): void {
   const now = nowIso(ctx);
   ctx.db
     .prepare(
       `INSERT INTO ai_runs (id, owner_id, job_id, role, connection_id, model_id, prompt_version, attempt, purpose,
          status, error_code, usage_json, latency_ms, created_at, updated_at)
-       VALUES (?, ?, ?, 'information', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       newId(),
       OWNER_ID,
       job.id,
+      extra.role ?? "information",
       t.connectionId,
       t.modelId,
       promptVersion,
@@ -315,18 +344,275 @@ function backoffMs(attempt: number, retryAfter: number | null, random: () => num
   return Math.max(jittered, retryAfter ?? 0);
 }
 
+/** Settle a job after every allowed target failed: configuration, retry or failure. */
+function settleProviderFailure(ctx: Ctx, deps: WorkerDeps, job: Claimed, err: ProviderError): void {
+  if (needsConfiguration(err.code)) {
+    settleJob(ctx, job, "waiting_configuration", { code: err.code, message: err.message });
+  } else if (isRetryable(err.code) && job.attempt < maxAttempts(ctx, job.id)) {
+    const runAfter = new Date(deps.clock().getTime() + backoffMs(job.attempt, err.retryAfterMs, deps.random ?? Math.random)).toISOString();
+    settleJob(ctx, job, "retry_wait", { code: err.code, message: err.message }, runAfter);
+  } else {
+    settleJob(ctx, job, "failed", { code: err.code, message: err.message });
+  }
+}
+
+const asProviderError = (err: unknown, fallback: string): ProviderError =>
+  err instanceof ProviderError ? err : new ProviderError("unavailable", fallback);
+
+/* ---- OCR stage (docs/04 §2) ---- */
+
+/** OCR calls get at least this long; a connection may allow more (slow CPU Ollama). */
+export const OCR_TIMEOUT_MS = 240_000;
+
+type OcrOutcome =
+  | { kind: "ok"; image: OcrImageResult; target: Target }
+  | { kind: "invalid"; problems: string[] }
+  | { kind: "provider_error"; error: ProviderError };
+
+async function ocrOne(
+  ctx: Ctx,
+  deps: WorkerDeps,
+  job: Claimed,
+  targets: Target[],
+  prompt: PromptBundle,
+  attachment: AttachmentRow,
+): Promise<OcrOutcome> {
+  if (!deps.paths) throw new Error("worker has no data paths; cannot read attachments");
+  const binding = getRole(ctx, "ocr");
+  const messages = buildOcrMessages(prompt, {
+    attachmentId: attachment.id,
+    mime: attachment.derived_mime,
+    bytes: readDerivedImage(deps.paths, attachment),
+  });
+  let lastError: ProviderError | null = null;
+  for (const target of targets) {
+    let client: OpenAiCompatibleClient;
+    try {
+      const conn = resolveConnection(ctx, deps.ai, target.connectionId);
+      client = new OpenAiCompatibleClient({ ...conn, timeoutMs: Math.max(conn.timeoutMs, OCR_TIMEOUT_MS) }, deps.ai.transport);
+    } catch (err) {
+      lastError = err instanceof ProviderError ? err : new ProviderError("not_configured", "Kết nối AI không dùng được.");
+      continue;
+    }
+    const call = async (msgs: ChatMessage[], purpose: "extract" | "repair") => {
+      try {
+        const out = await client.chat({
+          model: target.modelId,
+          messages: msgs,
+          maxTokens: binding?.max_tokens ?? 4096,
+          temperature: binding?.temperature ?? 0,
+          jsonSchema: { name: "personalass_ocr", schema: ocrJsonSchema },
+        });
+        recordRun(ctx, job, target, prompt.version, purpose, "ok", { usage: out.usage, latencyMs: out.latencyMs, role: "ocr" });
+        return out.content;
+      } catch (err) {
+        const pe = asProviderError(err, "Lỗi khi gọi provider OCR.");
+        recordRun(ctx, job, target, prompt.version, purpose, "provider_error", { errorCode: pe.code, role: "ocr" });
+        throw pe;
+      }
+    };
+    let content: string;
+    try {
+      content = await call(messages, "extract");
+    } catch (err) {
+      lastError = err as ProviderError;
+      // Another allowed target may still work; a hard error stops here.
+      if (isRetryable(lastError.code) || needsConfiguration(lastError.code)) continue;
+      break;
+    }
+    let parsed = parseOcrOutput(content, attachment.id);
+    if (!parsed.ok) {
+      recordRun(ctx, job, target, prompt.version, "extract", "invalid_output", { errorCode: "invalid_output", role: "ocr" });
+      // One bounded repair attempt, then a clear failure (docs/04 §8).
+      try {
+        parsed = parseOcrOutput(await call(buildOcrRepairMessages(messages, content, parsed.problems), "repair"), attachment.id);
+      } catch (err) {
+        lastError = err as ProviderError;
+        if (isRetryable(lastError.code) || needsConfiguration(lastError.code)) continue;
+        break;
+      }
+      if (!parsed.ok) {
+        recordRun(ctx, job, target, prompt.version, "repair", "invalid_output", { errorCode: "invalid_output", role: "ocr" });
+        return { kind: "invalid", problems: parsed.problems };
+      }
+    }
+    return { kind: "ok", image: parsed.image, target };
+  }
+  return { kind: "provider_error", error: lastError ?? new ProviderError("unavailable", "Không gọi được provider OCR nào.") };
+}
+
 /**
- * Process one claimed job end to end. Every outcome is written with the
- * fencing token, so a run whose lease was reclaimed writes nothing.
+ * Store one OCR result. Guarded by the fencing token like every other
+ * commit, and unique per (job, attachment), so a reclaimed or retried run
+ * never stores a second result (A08/A32). Returns false when fenced.
+ */
+function commitOcrRun(ctx: Ctx, job: Claimed, attachment: AttachmentRow, target: Target, promptVersion: string, image: OcrImageResult): boolean {
+  return transaction(ctx.db, () => {
+    const fence = ctx.db.prepare("SELECT fencing_token, state FROM jobs WHERE id = ?").get(job.id) as Row | undefined;
+    if (!fence || Number(fence.fencing_token) !== job.fencingToken || fence.state !== "running") return false;
+    // The user corrected this image while the call was in flight: their run
+    // stays effective; the late AI result is dropped, never stacked on top.
+    if (effectiveOcrRun(ctx, attachment.id) !== null) return true;
+    ctx.db
+      .prepare(
+        `INSERT OR IGNORE INTO ocr_runs (id, owner_id, attachment_id, job_id, author, connection_id, model_id, prompt_version,
+           status, extracted_text, blocks_json, uncertainties_json, created_at)
+         VALUES (?, ?, ?, ?, 'ai', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        newId(),
+        OWNER_ID,
+        attachment.id,
+        job.id,
+        target.connectionId,
+        target.modelId,
+        promptVersion,
+        image.status,
+        image.transcription,
+        JSON.stringify(image.blocks),
+        JSON.stringify(image.uncertainties),
+        nowIso(ctx),
+      );
+    return true;
+  });
+}
+
+/**
+ * Read every image of the revision that has no OCR result yet. A stored
+ * result (an earlier attempt, an earlier job, or the user's correction) is
+ * reused, so a retry never pays for the same image twice. Returns false when
+ * the job was settled (waiting/retry/failed) or fenced.
+ */
+async function runOcrStage(
+  ctx: Ctx,
+  deps: WorkerDeps,
+  job: Claimed,
+  privacy: string,
+  attachments: AttachmentRow[],
+  log: Logger,
+): Promise<boolean> {
+  const pending = attachments.filter((a) => effectiveOcrRun(ctx, a.id) === null);
+  if (pending.length === 0) return true;
+  const resolved = resolveTargets(ctx, "ocr", privacy);
+  if ("error" in resolved) {
+    // No vision model: the images stay stored, nothing is sent to a text-only model (docs/04 §2).
+    settleJob(ctx, job, "waiting_configuration", { code: resolved.error.code, message: resolved.error.message });
+    log.warn("job_waiting_configuration", { error_code: resolved.error.code, stage: "ocr" });
+    return false;
+  }
+  const prompt = deps.ocrPrompt ?? loadOcrPrompt();
+  for (const attachment of pending) {
+    const out = await ocrOne(ctx, deps, job, resolved.targets, prompt, attachment);
+    if (out.kind === "provider_error") {
+      log.warn("ocr_call_failed", { attachment_id: attachment.id, error_code: out.error.code });
+      settleProviderFailure(ctx, deps, job, out.error);
+      return false;
+    }
+    if (out.kind === "invalid") {
+      settleJob(ctx, job, "failed", {
+        code: "invalid_output",
+        message: `Model OCR trả về kết quả không hợp lệ sau 1 lần sửa: ${out.problems.slice(0, 3).join("; ")}`.slice(0, 500),
+      });
+      log.warn("job_failed_invalid_ocr", { attachment_id: attachment.id });
+      return false;
+    }
+    if (!commitOcrRun(ctx, job, attachment, out.target, prompt.version, out.image)) {
+      log.warn("job_commit_fenced", { stage: "ocr" });
+      return false;
+    }
+    log.info("ocr_stored", { attachment_id: attachment.id, status: out.image.status, uncertain: out.image.uncertainties.length });
+  }
+  return true;
+}
+
+/** Effective OCR text of each image, for the prompt and for the policy gate. */
+function ocrSourcesOf(ctx: Ctx, attachments: AttachmentRow[]): { prompt: OcrSource[]; evidence: OcrEvidenceSource[] } {
+  const prompt: OcrSource[] = [];
+  const evidence: OcrEvidenceSource[] = [];
+  for (const a of attachments) {
+    const run = effectiveOcrRun(ctx, a.id);
+    if (!run) continue;
+    const uncertain = [
+      ...run.uncertainties.map((u) => ({ fragment: u.fragment, alternatives: u.alternatives })),
+      ...run.blocks.filter((b) => b.uncertain).map((b) => ({ fragment: b.text, alternatives: [] as string[] })),
+    ].filter((u) => u.fragment.trim().length > 0);
+    const position = a.position ?? 0;
+    prompt.push({
+      sourceId: run.id,
+      imagePosition: position,
+      status: run.status,
+      text: run.text,
+      uncertainFragments: uncertain.map((u) => u.fragment),
+    });
+    evidence.push({ runId: run.id, imagePosition: position, status: run.status, text: run.text, uncertain });
+  }
+  return { prompt, evidence };
+}
+
+/**
+ * Process one claimed job end to end: OCR of the revision's images (when
+ * any), then the information step over memo text + OCR text. Every outcome
+ * is written with the fencing token, so a run whose lease was reclaimed
+ * writes nothing.
  */
 export async function processJob(deps: WorkerDeps, job: Claimed): Promise<void> {
   const ctx: Ctx = { db: deps.db, clock: deps.clock };
   const log = deps.logger.child({ job_id: job.id });
-  const prompt = deps.prompt ?? loadInformationPrompt();
-  const random = deps.random ?? Math.random;
-  const rev = loadRevision(ctx, job.revisionId);
+  const beat = setInterval(() => heartbeat(ctx, job), deps.heartbeatMs ?? HEARTBEAT_MS);
+  try {
+    const loaded = loadRevision(ctx, job.revisionId);
+    const attachments = attachmentsOfRevision(ctx, job.revisionId);
+    if (attachments.length > 0 && !(await runOcrStage(ctx, deps, job, loaded.privacy, attachments, log))) return;
+    const ocr = ocrSourcesOf(ctx, attachments);
+    const rev: RevisionInfo & { capturedAt: string; privacy: string } = { ...loaded, ocr: ocr.evidence };
+    await runInformationStage(ctx, deps, job, rev, ocr.prompt, log);
+  } catch (err) {
+    log.error("job_crashed", { error: err instanceof Error ? err.message : String(err) });
+    settleJob(ctx, job, "failed", { code: "internal_error", message: "Lỗi nội bộ khi xử lý memo." });
+  } finally {
+    clearInterval(beat);
+  }
+}
 
-  const resolved = resolveTargets(ctx, deps, rev.privacy);
+async function runInformationStage(
+  ctx: Ctx,
+  deps: WorkerDeps,
+  job: Claimed,
+  rev: RevisionInfo & { capturedAt: string; privacy: string },
+  ocrSources: OcrSource[],
+  log: Logger,
+): Promise<void> {
+  const prompt = deps.prompt ?? loadInformationPrompt();
+  const candidates = loadCandidates(ctx, rev.capturedAt);
+  const commit = (proposal: ProposalEnvelope, target: Target | null): void => {
+    try {
+      const summary = applyProposal(ctx, {
+        jobId: job.id,
+        fencingToken: job.fencingToken,
+        revision: rev,
+        proposal,
+        candidates,
+        promptVersion: prompt.version,
+        modelId: target?.modelId ?? null,
+        connectionId: target?.connectionId ?? null,
+      });
+      log.info("job_succeeded", { proposal_id: summary.proposalId, state: summary.state, applied: summary.applied });
+    } catch (err) {
+      if (err instanceof StaleJobError) {
+        log.warn("job_commit_fenced", {});
+        return;
+      }
+      throw err;
+    }
+  };
+
+  if (rev.text.trim().length === 0 && ocrSources.every((o) => o.text.trim().length === 0)) {
+    // Images only and none readable: nothing to extract, no model call.
+    commit({ schema_version: "1.0", source_revision_id: rev.id, actions: [] }, null);
+    return;
+  }
+
+  const resolved = resolveTargets(ctx, "information", rev.privacy);
   if ("error" in resolved) {
     settleJob(ctx, job, "waiting_configuration", { code: resolved.error.code, message: resolved.error.message });
     log.warn("job_waiting_configuration", { error_code: resolved.error.code });
@@ -334,10 +620,10 @@ export async function processJob(deps: WorkerDeps, job: Claimed): Promise<void> 
   }
 
   const settings = loadSettings(ctx);
-  const candidates = loadCandidates(ctx, rev.capturedAt);
   const messages = buildInformationMessages(prompt, {
     revisionId: rev.id,
     text: rev.text,
+    ocrSources,
     capturedAt: rev.capturedAt,
     timezone: rev.timezone,
     capturedLocal: formatCapturedLocal(rev.capturedAt, rev.timezone),
@@ -345,101 +631,65 @@ export async function processJob(deps: WorkerDeps, job: Claimed): Promise<void> 
     candidates,
   });
   const binding = getRole(ctx, "information");
-  const beat = setInterval(() => heartbeat(ctx, job), deps.heartbeatMs ?? HEARTBEAT_MS);
   let lastError: ProviderError | null = null;
-  try {
-    for (const target of resolved.targets) {
-      let client: OpenAiCompatibleClient;
+  for (const target of resolved.targets) {
+    let client: OpenAiCompatibleClient;
+    try {
+      client = new OpenAiCompatibleClient(resolveConnection(ctx, deps.ai, target.connectionId), deps.ai.transport);
+    } catch (err) {
+      lastError = err instanceof ProviderError ? err : new ProviderError("not_configured", "Kết nối AI không dùng được.");
+      continue;
+    }
+    const call = async (msgs: typeof messages, purpose: "extract" | "repair") => {
+      const out = await client.chat({
+        model: target.modelId,
+        messages: msgs,
+        maxTokens: binding?.max_tokens ?? 2048,
+        temperature: binding?.temperature ?? 0.1,
+        jsonSchema: { name: "personalass_proposal", schema: proposalJsonSchema },
+      });
+      recordRun(ctx, job, target, prompt.version, purpose, "ok", { usage: out.usage, latencyMs: out.latencyMs });
+      return out.content;
+    };
+    let content: string;
+    try {
+      content = await call(messages, "extract");
+    } catch (err) {
+      lastError = asProviderError(err, "Lỗi khi gọi provider.");
+      recordRun(ctx, job, target, prompt.version, "extract", "provider_error", { errorCode: lastError.code });
+      log.warn("provider_call_failed", { connection_id: target.connectionId, error_code: lastError.code });
+      // Retryable or configuration errors: try the next allowed target.
+      if (isRetryable(lastError.code) || needsConfiguration(lastError.code)) continue;
+      break;
+    }
+
+    let parsed = parseModelOutput(content, rev.id);
+    if (!parsed.ok) {
+      recordRun(ctx, job, target, prompt.version, "extract", "invalid_output", { errorCode: "invalid_output" });
+      // One bounded repair attempt, then a clear failure (A09).
       try {
-        client = new OpenAiCompatibleClient(resolveConnection(ctx, deps.ai, target.connectionId), deps.ai.transport);
+        const repaired = await call(buildRepairMessages(messages, content, parsed.problems), "repair");
+        parsed = parseModelOutput(repaired, rev.id);
       } catch (err) {
-        lastError = err instanceof ProviderError ? err : new ProviderError("not_configured", "Kết nối AI không dùng được.");
-        continue;
-      }
-      const call = async (msgs: typeof messages, purpose: "extract" | "repair") => {
-        const out = await client.chat({
-          model: target.modelId,
-          messages: msgs,
-          maxTokens: binding?.max_tokens ?? 2048,
-          temperature: binding?.temperature ?? 0.1,
-          jsonSchema: { name: "personalass_proposal", schema: proposalJsonSchema },
-        });
-        recordRun(ctx, job, target, prompt.version, purpose, "ok", { usage: out.usage, latencyMs: out.latencyMs });
-        return out.content;
-      };
-      let content: string;
-      try {
-        content = await call(messages, "extract");
-      } catch (err) {
-        lastError = err instanceof ProviderError ? err : new ProviderError("unavailable", "Lỗi khi gọi provider.");
-        recordRun(ctx, job, target, prompt.version, "extract", "provider_error", { errorCode: lastError.code });
-        log.warn("provider_call_failed", { connection_id: target.connectionId, error_code: lastError.code });
-        // Retryable or configuration errors: try the next allowed target.
+        lastError = asProviderError(err, "Lỗi khi gọi provider.");
+        recordRun(ctx, job, target, prompt.version, "repair", "provider_error", { errorCode: lastError.code });
         if (isRetryable(lastError.code) || needsConfiguration(lastError.code)) continue;
         break;
       }
-
-      let parsed = parseModelOutput(content, rev.id);
       if (!parsed.ok) {
-        recordRun(ctx, job, target, prompt.version, "extract", "invalid_output", { errorCode: "invalid_output" });
-        // One bounded repair attempt, then a clear failure (A09).
-        try {
-          const repaired = await call(buildRepairMessages(messages, content, parsed.problems), "repair");
-          parsed = parseModelOutput(repaired, rev.id);
-        } catch (err) {
-          lastError = err instanceof ProviderError ? err : new ProviderError("unavailable", "Lỗi khi gọi provider.");
-          recordRun(ctx, job, target, prompt.version, "repair", "provider_error", { errorCode: lastError.code });
-          if (isRetryable(lastError.code) || needsConfiguration(lastError.code)) continue;
-          break;
-        }
-        if (!parsed.ok) {
-          recordRun(ctx, job, target, prompt.version, "repair", "invalid_output", { errorCode: "invalid_output" });
-          settleJob(ctx, job, "failed", {
-            code: "invalid_output",
-            message: `Model trả về proposal không hợp lệ sau 1 lần sửa: ${parsed.problems.slice(0, 3).join("; ")}`.slice(0, 500),
-          });
-          log.warn("job_failed_invalid_output", {});
-          return;
-        }
-      }
-
-      try {
-        const summary = applyProposal(ctx, {
-          jobId: job.id,
-          fencingToken: job.fencingToken,
-          revision: rev,
-          proposal: parsed.proposal,
-          candidates,
-          promptVersion: prompt.version,
-          modelId: target.modelId,
-          connectionId: target.connectionId,
+        recordRun(ctx, job, target, prompt.version, "repair", "invalid_output", { errorCode: "invalid_output" });
+        settleJob(ctx, job, "failed", {
+          code: "invalid_output",
+          message: `Model trả về proposal không hợp lệ sau 1 lần sửa: ${parsed.problems.slice(0, 3).join("; ")}`.slice(0, 500),
         });
-        log.info("job_succeeded", { proposal_id: summary.proposalId, state: summary.state, applied: summary.applied });
-      } catch (err) {
-        if (err instanceof StaleJobError) {
-          log.warn("job_commit_fenced", {});
-          return;
-        }
-        throw err;
+        log.warn("job_failed_invalid_output", {});
+        return;
       }
-      return;
     }
-
-    const err = lastError ?? new ProviderError("unavailable", "Không gọi được provider nào.");
-    if (needsConfiguration(err.code)) {
-      settleJob(ctx, job, "waiting_configuration", { code: err.code, message: err.message });
-    } else if (isRetryable(err.code) && job.attempt < maxAttempts(ctx, job.id)) {
-      const runAfter = new Date(deps.clock().getTime() + backoffMs(job.attempt, err.retryAfterMs, random)).toISOString();
-      settleJob(ctx, job, "retry_wait", { code: err.code, message: err.message }, runAfter);
-    } else {
-      settleJob(ctx, job, "failed", { code: err.code, message: err.message });
-    }
-  } catch (err) {
-    log.error("job_crashed", { error: err instanceof Error ? err.message : String(err) });
-    settleJob(ctx, job, "failed", { code: "internal_error", message: "Lỗi nội bộ khi xử lý memo." });
-  } finally {
-    clearInterval(beat);
+    commit(parsed.proposal, target);
+    return;
   }
+  settleProviderFailure(ctx, deps, job, lastError ?? new ProviderError("unavailable", "Không gọi được provider nào."));
 }
 
 function maxAttempts(ctx: Ctx, jobId: string): number {

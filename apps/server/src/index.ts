@@ -11,6 +11,7 @@ import { startScheduler } from "./domain/scheduler.js";
 import { policyTransport } from "./ai/net-policy.js";
 import type { AiDeps } from "./domain/ai-config.js";
 import { startWorker } from "./jobs/worker.js";
+import { purgeExpiredUploads } from "./storage/attachments.js";
 import { loadMasterKey } from "./secrets/master-key.js";
 import { createLogger } from "./logger.js";
 import { appVersion } from "./version.js";
@@ -65,12 +66,25 @@ async function main(): Promise<void> {
       onJobQueued: () => wakeWorker(),
     });
     const stopScheduler = startScheduler({ db, clock }, logger);
-    const worker = startWorker({ db, clock, ai, logger });
+    const purgeCtx = { db, clock };
+    const purge = () => {
+      try {
+        const n = purgeExpiredUploads(purgeCtx, paths);
+        if (n > 0) logger.info("expired_uploads_purged", { count: n });
+      } catch (err) {
+        logger.error("upload_purge_failed", { error: err instanceof Error ? err.message : String(err) });
+      }
+    };
+    purge();
+    const purgeTimer = setInterval(purge, 10 * 60_000);
+    purgeTimer.unref();
+    const worker = startWorker({ db, clock, ai, logger, paths });
     wakeWorker = worker.wake;
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info("shutdown_started", { signal });
       stopScheduler();
+      clearInterval(purgeTimer);
       await worker.stop();
       try {
         await app.close();

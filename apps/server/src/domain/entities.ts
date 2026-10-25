@@ -123,12 +123,30 @@ export function linkSource(ctx: Ctx, entityType: string, entityId: string, sourc
   if (!rev) throw new DomainError("UNPROCESSABLE_ENTITY", "Nguồn memo không tồn tại.", {
     "source.memo_revision_id": "Không tìm thấy bản memo.",
   });
+  // An image quote must name an OCR run of an image of that same revision
+  // (polymorphic link, validated here in the transaction: docs/03 §2).
+  let attachmentId: string | null = null;
+  if (source.ocr_run_id) {
+    const run = ctx.db
+      .prepare(
+        `SELECT o.attachment_id FROM ocr_runs o JOIN attachments a ON a.id = o.attachment_id
+         WHERE o.id = ? AND o.owner_id = ? AND a.memo_revision_id = ?`,
+      )
+      .get(source.ocr_run_id, OWNER_ID, source.memo_revision_id) as Row | undefined;
+    if (!run) {
+      throw new DomainError("UNPROCESSABLE_ENTITY", "Nguồn ảnh không thuộc bản memo này.", {
+        "source.ocr_run_id": "Không tìm thấy bản OCR của ảnh trong memo.",
+      });
+    }
+    attachmentId = String(run.attachment_id);
+  }
   const now = nowIso(ctx);
   ctx.db
     .prepare(
       `INSERT INTO source_links
-         (id, owner_id, entity_type, entity_id, memo_revision_id, quote, field_path, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, owner_id, entity_type, entity_id, memo_revision_id, attachment_id, ocr_run_id, quote, field_path,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       newId(),
@@ -136,6 +154,8 @@ export function linkSource(ctx: Ctx, entityType: string, entityId: string, sourc
       entityType,
       entityId,
       source.memo_revision_id,
+      attachmentId,
+      source.ocr_run_id ?? null,
       source.quote ?? null,
       ctx.auditSource ?? "manual",
       now,

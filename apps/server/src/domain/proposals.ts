@@ -141,12 +141,65 @@ type Decision =
   | { kind: "reject"; reason: string }
   | { kind: "wait"; reason: string };
 
-export type RevisionInfo = { id: string; memoId: string; text: string; timezone: string };
+/** Effective OCR text of one image, as the information model saw it (M3). */
+export type OcrEvidenceSource = {
+  runId: string;
+  imagePosition: number;
+  status: "readable" | "partial" | "unreadable";
+  text: string;
+  /** Uncertain fragments and uncertain blocks of that run, with any alternatives. */
+  uncertain: Array<{ fragment: string; alternatives: string[] }>;
+};
+
+export type RevisionInfo = { id: string; memoId: string; text: string; timezone: string; ocr?: OcrEvidenceSource[] };
 
 type ActionShape = Pick<ProposalActionInput, "operation" | "entity_type" | "target_id" | "expected_version" | "fields" | "evidence">;
 
+/**
+ * Source link for an AI change. A quote taken from an image points at the
+ * exact OCR run it came from (docs/03 §3), never at "the latest OCR".
+ */
 function sourceOf(rev: RevisionInfo, a: ActionShape) {
-  return { memo_revision_id: rev.id, quote: a.evidence.map((e) => e.quote).join(" … ").slice(0, 2000) };
+  const fromImage = a.evidence.find((e) => e.source_id !== rev.id);
+  return {
+    memo_revision_id: rev.id,
+    quote: a.evidence.map((e) => e.quote).join(" … ").slice(0, 2000),
+    ...(fromImage ? { ocr_run_id: fromImage.source_id } : {}),
+  };
+}
+
+const TIME_FIELDS = ["starts_at", "ends_at", "local_date", "due_date", "due_at", "planned_at"] as const;
+
+/**
+ * A06 gate: a date/time is never scheduled while any image of the memo was
+ * read with doubt. Deliberately conservative: matching the doubtful fragment
+ * against the proposed value missed weekday names, hours, years, "thg",
+ * "1?/11" and more, so ANY uncertainty in a stored OCR run (or a partly
+ * readable image) holds every time field of the memo's actions for the user.
+ * Uncertainty comes from the stored run, never from the information model;
+ * a user correction (no uncertainties) lifts it.
+ */
+function ocrTimeDoubt(rev: RevisionInfo, a: ActionShape): { fieldPath: string; question: string } | null {
+  if (!rev.ocr || rev.ocr.length === 0) return null;
+  const fields = TIME_FIELDS.filter((f) => typeof a.fields[f] === "string" && (a.fields[f] as string).length > 0);
+  if (fields.length === 0) return null;
+  for (const o of rev.ocr) {
+    const u = o.uncertain[0];
+    if (u) {
+      const alts = u.alternatives.length > 0 ? ` (có thể là ${u.alternatives.join(" hoặc ")})` : "";
+      return {
+        fieldPath: fields.join(","),
+        question: `Ảnh #${o.imagePosition + 1} ghi «${u.fragment}» chưa rõ${alts}. Bạn xác nhận thời gian đúng?`,
+      };
+    }
+    if (o.status === "partial") {
+      return {
+        fieldPath: fields.join(","),
+        question: `Ảnh #${o.imagePosition + 1} chỉ đọc được một phần. Bạn xác nhận thời gian đúng (hoặc sửa chữ của ảnh)?`,
+      };
+    }
+  }
+  return null;
 }
 
 /**
@@ -206,9 +259,11 @@ function decide(
   candidates: Candidate[],
   statusByActionId: Map<string, ProposalActionStatus>,
 ): Decision {
-  const source = normalizeText(rev.text);
   for (const e of a.evidence) {
-    if (e.source_id !== rev.id || !source.includes(normalizeText(e.quote))) {
+    // A quote must be found verbatim in the source it names: the memo text or
+    // the OCR run of one of its images (the run the model was given).
+    const text = e.source_id === rev.id ? rev.text : rev.ocr?.find((o) => o.runId === e.source_id)?.text;
+    if (text === undefined || !normalizeText(text).includes(normalizeText(e.quote))) {
       return { kind: "reject", reason: "evidence_mismatch" };
     }
   }
@@ -216,6 +271,13 @@ function decide(
     if (statusByActionId.get(dep) !== "applied") return { kind: "wait", reason: `dependency_not_applied:${dep}` };
   }
   if (!SUPPORTED_TYPES.has(a.entity_type)) return { kind: "reject", reason: "entity_type_not_supported_yet" };
+
+  // Asking for the exact value also covers request_confirmation: the user's
+  // typed answer is the explicit decision.
+  const doubt = ocrTimeDoubt(rev, a);
+  if (doubt) {
+    return { kind: "clarify", clarKind: "missing_fields", fieldPath: doubt.fieldPath, question: doubt.question, options: [], reason: "ocr_uncertain" };
+  }
 
   const questions = a.ambiguity.map((x) => x.question).filter((q) => q.trim().length > 0);
   const paths = a.ambiguity.map((x) => x.field_path).filter((p) => p.length > 0);
@@ -357,6 +419,30 @@ function savepoint<T>(ctx: Ctx, fn: () => T): { ok: true; value: T } | { ok: fal
     ctx.db.exec("RELEASE action_apply");
     return { ok: false, error };
   }
+}
+
+function supersedeOlderOpenActions(ctx: Ctx, revisionId: string, keepProposalId: string): void {
+  const now = nowIso(ctx);
+  const touched = ctx.db
+    .prepare(
+      `SELECT DISTINCT proposal_id FROM proposal_actions WHERE memo_revision_id = ? AND proposal_id <> ?
+         AND status IN ('needs_clarification', 'waiting_dependency')`,
+    )
+    .all(revisionId, keepProposalId) as Row[];
+  ctx.db
+    .prepare(
+      `UPDATE clarifications SET state = 'dismissed', version = version + 1, updated_at = ?
+       WHERE state = 'open' AND proposal_action_id IN (
+         SELECT id FROM proposal_actions WHERE memo_revision_id = ? AND proposal_id <> ?)`,
+    )
+    .run(now, revisionId, keepProposalId);
+  ctx.db
+    .prepare(
+      `UPDATE proposal_actions SET status = 'dismissed', reason = 'superseded', version = version + 1, updated_at = ?
+       WHERE memo_revision_id = ? AND proposal_id <> ? AND status IN ('needs_clarification', 'waiting_dependency')`,
+    )
+    .run(now, revisionId, keepProposalId);
+  for (const r of touched) refreshProposalState(ctx, String(r.proposal_id));
 }
 
 export class StaleJobError extends Error {
@@ -573,6 +659,11 @@ export function applyProposal(ctx: Ctx, args: ApplyArgs): ApplySummary {
       }
     }
 
+    // Open questions of earlier proposals for this revision are stale now
+    // (reprocess, OCR correction): this proposal re-asks whatever is still
+    // unclear, so the old ones are closed instead of left to be answered twice.
+    supersedeOlderOpenActions(ctx, rev.id, proposalId);
+
     const state =
       applied > 0 && clarifications > 0
         ? "partial"
@@ -601,7 +692,10 @@ export function applyProposal(ctx: Ctx, args: ApplyArgs): ApplySummary {
 /* ------------------------------------------------------------------ */
 
 export function toProposalAction(r: Row): ProposalAction {
-  const evidence = JSON.parse(String(r.evidence_json)) as Array<{ quote?: unknown }>;
+  const evidence = JSON.parse(String(r.evidence_json)) as Array<{ quote?: unknown; source_id?: unknown }>;
+  // Evidence from an image names the OCR run it quoted; memo text names the revision.
+  const ocrRunOf = (e: { source_id?: unknown }) =>
+    typeof e.source_id === "string" && e.source_id !== String(r.memo_revision_id) ? e.source_id : null;
   return {
     id: String(r.id),
     proposal_id: String(r.proposal_id),
@@ -611,7 +705,7 @@ export function toProposalAction(r: Row): ProposalAction {
     status: r.status as ProposalActionStatus,
     reason: (r.reason as string | null) ?? null,
     fields: JSON.parse(String(r.fields_json)) as Record<string, unknown>,
-    evidence: evidence.map((e) => ({ quote: String(e.quote ?? "") })),
+    evidence: evidence.map((e) => ({ quote: String(e.quote ?? ""), ocr_run_id: ocrRunOf(e) })),
     result_entity_type: (r.result_entity_type as string | null) ?? null,
     result_entity_id: (r.result_entity_id as string | null) ?? null,
     action_group_id: (r.action_group_id as string | null) ?? null,
@@ -731,7 +825,19 @@ export function answerClarification(ctx: Ctx, id: string, input: ClarificationAn
 
   if (kind === "missing_fields") {
     if (!("fields" in answer)) throw new DomainError("BAD_REQUEST", "Câu hỏi này cần answer.fields.");
-    action.fields = { ...action.fields, ...answer.fields };
+    // The fields the question asked about are dropped first: a value the
+    // model guessed (e.g. from a doubtful OCR date) is never applied just
+    // because the user's answer left that field out.
+    const asked = String(clar.field_path ?? "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    const kept = Object.fromEntries(Object.entries(action.fields).filter(([k]) => !asked.includes(k)));
+    const missing = asked.filter((p) => TIME_FIELDS.includes(p as (typeof TIME_FIELDS)[number]) && !(p in answer.fields));
+    if (actionRow.reason === "ocr_uncertain" && missing.length > 0) {
+      throw new DomainError("BAD_REQUEST", "Cần nhập thời gian đúng.", Object.fromEntries(missing.map((p) => [`answer.fields.${p}`, "Bắt buộc."])));
+    }
+    action.fields = { ...kept, ...answer.fields };
   } else if (kind === "choose_target") {
     if (!("choice" in answer)) throw new DomainError("BAD_REQUEST", "Câu hỏi này cần answer.choice.");
     const options = JSON.parse(String(clar.options_json)) as Array<{ value: string }>;

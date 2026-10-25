@@ -1,6 +1,6 @@
 # PersonalAss — runbook local (Windows 11)
 
-M0 (nền): Expo Web + Fastify + shared contracts + SQLite migration. Chưa có AI, chưa có ghi dữ liệu nghiệp vụ.
+M0–M3: Expo Web + Fastify + SQLite; memo, việc, lịch, nhắc; AI xử lý memo (M2); ảnh + OCR (M3).
 
 ## Yêu cầu
 
@@ -106,6 +106,14 @@ curl.exe -X PUT http://127.0.0.1:2310/api/v1/ai/roles -H "content-type: applicat
 - Memo lưu trước, job xử lý sau. Không có cấu hình hoặc key sai → job `waiting_configuration`, tự chạy lại khi sửa kết nối/role. Provider offline/429 → `retry_wait` (tối đa 3 lần). Xem `GET /api/v1/jobs/:id`.
 - Trang chính: ô “Để AI tạo việc/lịch/ghi chú từ memo” (mặc định bật) và “Chỉ xử lý cục bộ”. Mục **Memo gần đây** hiện trạng thái job, mục AI đã áp dụng (nút Hoàn tác), câu hỏi làm rõ (Lưu / Áp dụng / Xác nhận / Bỏ qua) và nút Xử lý lại.
 
+## Ảnh và OCR (M3)
+
+- Trang chính → **Thêm ảnh** (hoặc dán Ctrl+V / kéo thả): JPEG, PNG, WebP; mặc định tối đa 10 ảnh/memo, 10 MB/ảnh, 40 megapixel. Đổi bằng `MAX_IMAGES_PER_MEMO`, `MAX_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS` trong `.env`.
+- Ảnh gốc lưu ở `DATA_DIR/attachments/original` (tên UUID), bản gửi AI (JPEG thu nhỏ, đã bỏ EXIF) ở `attachments/derived`. Sao lưu cả thư mục `attachments` cùng database.
+- Cần gán vai trò **Đọc chữ trong ảnh (OCR)** trong Cài đặt AI cho một model đọc được ảnh, rồi bấm **Test ảnh**. Chưa gán → memo vẫn lưu, job `waiting_configuration`; model chỉ đọc text → `no_image_input`.
+- Chỗ OCR đọc chưa chắc được đánh dấu "⚠ chưa chắc"; khi ảnh còn chỗ nghi vấn, app hỏi lại mọi ngày/giờ thay vì tự tạo lịch. Bấm **Sửa chữ** để sửa → app tự xử lý lại với chữ đã sửa (không gọi OCR lại).
+- API: `POST /api/v1/attachments` (multipart field `file`) → `attachment_token`; `POST /api/v1/memos` với `attachment_tokens`; `POST /api/v1/attachments/:id/ocr-corrections`; `GET /api/v1/sources?entity_type=&entity_id=`.
+
 ## Cấu trúc repo
 
 ```
@@ -124,4 +132,4 @@ docs/            đặc tả thiết kế (không sửa khi code)
 
 ## Điều chưa có
 
-Chưa có OCR/upload ảnh (M3), people/project/search (M4), launcher + backup (M5), auth (M6), Docker (M6). Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.
+Chưa có people/project/search (M4), launcher + backup (M5), auth (M6), Docker (M6). Xem `IMPLEMENTATION-STATUS.md` và `docs/07-IMPLEMENTATION-ACCEPTANCE.md`.

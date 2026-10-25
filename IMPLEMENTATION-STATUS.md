@@ -9,7 +9,8 @@ Ngày bàn giao thiết kế: 21/10/2026. M0 triển khai xong ngày 22/10/2026.
 | M0 Nền | **Đã làm, đã kiểm tra** | 57 test vitest pass; typecheck/build server/build web pass; migrate idempotent; web gọi health thật qua trình duyệt |
 | M1 Manual slice | **Đã làm, đã kiểm tra (web)** | 126 test pass (contracts 24, server 86, client 16); E2E trình duyệt: memo → việc có nguồn → lịch hẹn → nhắc thật → restart backend → nhắc còn → ack/hoàn thành |
 | M2 AI text | **Backend + UI web đã làm, đã kiểm tra bằng mock; chưa smoke provider thật** | 163 test pass (contracts 24, server 117, client 22); E2E trình duyệt với endpoint OpenAI-compatible giả lập: cài đặt → memo → làm rõ → hoàn tác → chờ cấu hình → tự xử lý lại. Smoke OpenRouter/Ollama thật cần key của chủ sở hữu |
-| M3–M6 | Chưa bắt đầu | — |
+| M3 Images | **Đã làm, đã kiểm tra bằng mock; chưa smoke model đọc ảnh thật** | 250 test pass (contracts 24, server 184, client 42), gồm 32 test rà soát độc lập; E2E trình duyệt với endpoint vision giả lập: upload ảnh → OCR nghi vấn → hỏi, không tạo lịch → sửa chữ → xử lý lại → lịch đúng + nguồn mở đúng ảnh/bản OCR; 375 px không tràn |
+| M4–M6 | Chưa bắt đầu | — |
 
 Coder cập nhật file này sau mỗi milestone. Giữ test/benchmark chưa chạy ở trạng thái chưa xác minh.
 
@@ -241,3 +242,51 @@ Acceptance có test tự động (provider giả lập): A01, A02 (08:30), A03/A
 ## Đổi port mặc định (25/10/2026, theo yêu cầu chủ sản phẩm)
 
 Backend 4310 → **2310**, web dev Expo 8081 → **2311** trong code (`config.ts`, client `kit.tsx`/`status.tsx`, script `npm run web --port 2311`, `start-local.ps1`), test, `.env.example`, RUNBOOK và docs/06. `APP_ORIGIN` mặc định nay là `http://127.0.0.1:2311,http://localhost:2311`. Các bảng kết quả kiểm tra ở trên giữ nguyên port đã dùng lúc chạy thật (4310/8081/4300) vì đó là bản ghi lịch sử.
+
+## M3 — Ảnh và OCR (25/10/2026)
+
+Cách làm: coordinator (Opus) chia việc; Sonnet làm upload/lưu trữ (T1) và UI web (T2); Opus làm pipeline OCR, cổng nghi vấn, nguồn, sửa chữ; một Opus khác rà soát độc lập trong worktree riêng và viết test riêng (m3-review.test.ts). 11 test rà soát ban đầu fail → đã sửa → pass.
+
+### Đã làm
+
+| Hạng mục | Nội dung |
+| --- | --- |
+| Schema | `migrations/0005_m3_images.sql` (chỉ thêm): `attachments` (upload staging → gắn vào 1 memo revision; token chỉ lưu hash, có hạn; tên file UUID, không lưu đường dẫn tuyệt đối) và `ocr_runs` (bất biến: trigger chặn UPDATE/DELETE; `author` ai/user). Trigger chặn đổi nội dung file, đổi binding, xóa ảnh đã gắn |
+| Upload | `POST /api/v1/attachments` (multipart, `@fastify/multipart` 10.1.2). Kiểm magic bytes khớp MIME khai báo, decode thật bằng `sharp` 0.35.5, chặn decompression bomb (`MAX_IMAGE_PIXELS`), 413 khi quá `MAX_UPLOAD_BYTES`. Sinh bản dẫn xuất JPEG (xoay theo EXIF, thu nhỏ ≤ `DERIVED_IMAGE_MAX_EDGE`, bỏ EXIF) — chỉ bản này gửi AI. Upload hết hạn tự dọn mỗi 10 phút |
+| Memo | `POST /memos` nhận `attachment_tokens[]` (≤10, giữ thứ tự); text có thể rỗng nếu có ảnh; `input_kind` text/image/mixed; retry cùng `client_request_id` không gắn lại (A07). `GET /attachments/:id/content` phục vụ ảnh gốc đã gắn với `nosniff` + CSP sandbox |
+| OCR | Bước OCR trong worker trước bước information: mỗi ảnh một lần gọi, data URL, schema `examples/ocr.schema.json` (Zod strict, sửa tối đa 1 lần), timeout ≥ 240 s. Mỗi kết quả commit riêng có kiểm fencing token; retry/xử lý lại dùng lại kết quả đã lưu (không trả tiền đọc lại). Không có vai trò OCR → `waiting_configuration`; model không nhận ảnh → `no_image_input`; memo `local_only` không gửi ảnh lên cloud |
+| Nghi vấn (A06) | Bước information nhận chữ OCR như nguồn riêng (có source_id = id bản OCR, rào như dữ liệu chưa tin cậy). Cổng chính sách: nếu bất kỳ ảnh nào của memo có chỗ đọc chưa chắc (hoặc chỉ đọc được một phần), mọi trường ngày/giờ của mọi action chuyển thành câu hỏi `ocr_uncertain`, không tạo lịch/nhắc. Trả lời phải nhập lại thời gian; giá trị model đoán không bao giờ được áp |
+| Nguồn | Source link trỏ đúng `ocr_run_id` đã trích (docs/03 §3); `GET /api/v1/sources?entity_type=&entity_id=` trả ảnh + chữ của đúng bản OCR đó và cờ "đã có bản sửa mới hơn" |
+| Sửa chữ | `POST /attachments/:id/ocr-corrections` tạo bản OCR mới tác giả user (kiểm `expected_run_id`, 409 nếu đã đổi), tùy chọn xử lý lại; job đang chạy → `busy`. Kết quả AI về muộn không đè bản sửa. Xử lý lại đóng các câu hỏi cũ (`superseded`) và thay job đang chờ cấu hình |
+| AI settings | Test kết nối `kind: "image"` (ảnh PNG tổng hợp 16×16); vai trò OCR trong UI |
+| UI web | Chọn/dán/kéo thả ảnh (`ImagePicker.web.tsx`; bản native báo chưa hỗ trợ), xem trước, upload tuần tự giữ token khi retry; ảnh + chữ OCR + chỗ nghi vấn (có chữ "⚠ chưa chắc", không chỉ dựa màu) + "Sửa chữ"; "từ ảnh #n"; nút "Nguồn"; "Test ảnh" |
+
+### Lệnh kiểm tra
+
+| Lệnh | Kết quả |
+| --- | --- |
+| `npm run typecheck` | PASS (4 workspace) |
+| `npm run test` | PASS: contracts 24, server 184 (m3-attachments 18, m3-ocr 16, m3-review 32), client 42 |
+| `npm run build:server` / `npm run build:web` | PASS |
+
+### E2E trình duyệt (web tĩnh :2321, backend build :2320, DATA_DIR mới, endpoint vision giả lập :4398, ảnh tổng hợp)
+
+- Memo chỉ có ảnh → OCR "12/11 hoặc 17/11" nghi vấn → hiện chỗ chưa chắc + câu hỏi; Lịch hẹn (0).
+- Sửa chữ thành "17/11" → xử lý lại tự chạy (không gọi OCR lại) → lịch 17/11 09:00 "từ ảnh #1"; câu hỏi cũ "đã thay bằng lần xử lý mới".
+- "Nguồn" → trích dẫn, Ảnh #1, chữ của đúng bản OCR; ảnh tải được.
+- 375 px: không tràn ngang, ảnh co còn 309 px. Cài đặt AI: vai trò OCR, "Test ảnh" OK.
+- Chọn ảnh được kiểm bằng cách nạp file vào input file (không mở hộp thoại hệ điều hành); dán/kéo thả chưa thử bằng thao tác thật.
+
+### Hạn chế đã biết
+
+- Chưa smoke với model đọc ảnh thật (OpenRouter vision / Ollama vision) — cần key/endpoint của chủ sở hữu.
+- Cổng nghi vấn cố ý bảo thủ: một chỗ mờ bất kỳ (kể cả số tiền) trong ảnh sẽ giữ mọi ngày/giờ của memo đó để hỏi. Sửa chữ ảnh sẽ gỡ.
+- Xử lý lại dùng lại kết quả OCR đã có; chưa có nút "đọc lại ảnh bằng model".
+- Một action trích nhiều ảnh chỉ lưu nguồn tới ảnh đầu tiên.
+- `ai_runs` (log chi phí) ghi cả khi lần chạy bị fencing; OCR lỗi định dạng ở target chính không thử target dự phòng.
+- File mồ côi nếu tiến trình chết giữa ghi file và INSERT (không bao giờ được phục vụ; chưa có dọn dẹp).
+- "Nguồn" mới có trên các mục do AI tạo, chưa có trên danh sách việc tạo tay.
+
+### Bước tiếp theo
+
+M4 (taxonomy, projects/milestones, people/assets, search). Smoke model đọc ảnh thật khi có key.

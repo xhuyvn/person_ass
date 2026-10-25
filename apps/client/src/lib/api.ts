@@ -4,10 +4,14 @@ import {
   aiConnectionTestResultSchema,
   aiModelListSchema,
   aiRoleListSchema,
+  attachmentUploadReceiptSchema,
   apiErrorSchema,
   clarificationResultSchema,
   jobSchema,
   memoDetailSchema,
+  ocrCorrectionResultSchema,
+  ocrRunSchema,
+  sourceDetailSchema,
   undoResultSchema,
   type AiConnection,
   type AiConnectionCreate,
@@ -18,7 +22,11 @@ import {
   type AiRoleBindingInput,
   type ClarificationAnswer,
   type ClarificationResult,
+  type AttachmentUploadReceipt,
   type Job,
+  type OcrCorrectionResult,
+  type OcrRun,
+  type SourceDetail,
   type MemoDetail,
   type UndoResult,
   appointmentSchema,
@@ -82,6 +90,7 @@ export function createApi(options: ApiOptions) {
     /** Longer deadline for calls that wait on a provider (connection test). */
     timeoutOverrideMs?: number,
   ): Promise<z.output<S>> {
+    const isForm = typeof FormData !== "undefined" && body instanceof FormData;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutOverrideMs ?? timeoutMs);
     let response: Response;
@@ -90,10 +99,11 @@ export function createApi(options: ApiOptions) {
         method,
         headers: {
           accept: "application/json",
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          // FormData: the runtime sets the multipart content-type and boundary.
+          ...(body === undefined || isForm ? {} : { "content-type": "application/json" }),
           ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined ? {} : { body: isForm ? (body as FormData) : JSON.stringify(body) }),
         signal: controller.signal,
       });
     } catch {
@@ -127,6 +137,8 @@ export function createApi(options: ApiOptions) {
   const apptPage = paginationSchema(appointmentSchema);
   const notifPage = paginationSchema(notificationSchema);
   const memoPage = paginationSchema(memoDetailSchema);
+  const ocrRunPage = paginationSchema(ocrRunSchema);
+  const sourcePage = paginationSchema(sourceDetailSchema);
 
   return {
     createMemo: (
@@ -134,16 +146,31 @@ export function createApi(options: ApiOptions) {
       capturedAt: string,
       timezone: string,
       clientRequestId: string,
-      opts: { process?: boolean; privacy?: "default" | "local_only" } = {},
+      opts: { process?: boolean; privacy?: "default" | "local_only"; attachmentTokens?: string[] } = {},
     ): Promise<MemoReceipt> =>
       request("POST", "/memos", memoReceiptSchema, {
         client_request_id: clientRequestId,
         text,
+        ...(opts.attachmentTokens && opts.attachmentTokens.length > 0 ? { attachment_tokens: opts.attachmentTokens } : {}),
         captured_at: capturedAt,
         timezone,
         process: opts.process ?? true,
         privacy: opts.privacy ?? "default",
       }),
+    /** Stage one image; the returned token goes into createMemo. Do not set content-type by hand. */
+    uploadAttachment: (file: Blob, name: string): Promise<AttachmentUploadReceipt> => {
+      const form = new FormData();
+      form.append("file", file, name);
+      return request("POST", "/attachments", attachmentUploadReceiptSchema, form, undefined, 120000);
+    },
+    ocrRuns: (attachmentId: string): Promise<OcrRun[]> =>
+      request("GET", `/attachments/${attachmentId}/ocr-runs`, ocrRunPage).then((p) => p.items),
+    correctOcr: (attachmentId: string, body: { text: string; expected_run_id: string | null; reprocess?: boolean }): Promise<OcrCorrectionResult> =>
+      request("POST", `/attachments/${attachmentId}/ocr-corrections`, ocrCorrectionResultSchema, { reprocess: true, ...body }),
+    sources: (entityType: "task" | "appointment" | "note", entityId: string): Promise<SourceDetail[]> =>
+      request("GET", `/sources?entity_type=${entityType}&entity_id=${encodeURIComponent(entityId)}`, sourcePage).then((p) => p.items),
+    /** Absolute URL of an attachment's content_path (relative to the API origin). */
+    attachmentUrl: (contentPath: string): string => `${base}${contentPath.startsWith("/") ? "" : "/"}${contentPath}`,
     listMemos: (limit = 10): Promise<MemoDetail[]> =>
       request("GET", `/memos?limit=${limit}`, memoPage).then((p) => p.items),
     getMemo: (id: string): Promise<MemoDetail> => request("GET", `/memos/${id}`, memoDetailSchema),
@@ -159,7 +186,7 @@ export function createApi(options: ApiOptions) {
       request("POST", "/ai/connections", aiConnectionSchema, input, key()),
     patchConnection: (id: string, input: AiConnectionPatch): Promise<AiConnection> =>
       request("PATCH", `/ai/connections/${id}`, aiConnectionSchema, input),
-    testConnection: (id: string, kind: "metadata" | "text", modelId?: string): Promise<AiConnectionTestResult> =>
+    testConnection: (id: string, kind: "metadata" | "text" | "image", modelId?: string): Promise<AiConnectionTestResult> =>
       request("POST", `/ai/connections/${id}/test`, aiConnectionTestResultSchema, { kind, ...(modelId ? { model_id: modelId } : {}) }, undefined, 300000),
     listModels: (id: string): Promise<AiModelList> =>
       request("GET", `/ai/connections/${id}/models`, aiModelListSchema, undefined, undefined, 60000),

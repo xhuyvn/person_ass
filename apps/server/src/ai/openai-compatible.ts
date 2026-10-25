@@ -19,7 +19,10 @@ export type ResolvedConnection = {
   structuredOutput: StructuredOutput;
 };
 
-export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
+/** Image parts carry a data: URL only; images are never published to get a URL (docs/04 §2). */
+export type ContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
+export type ChatMessage = { role: "system" | "user" | "assistant"; content: string | ContentPart[] };
 
 export type ChatRequest = {
   model: string;
@@ -68,7 +71,7 @@ export class OpenAiCompatibleClient {
     }
   }
 
-  private fail(res: HttpResponse): never {
+  private fail(res: HttpResponse, withImages = false): never {
     const detail = sanitizeProviderText(extractErrorMessage(res.body), this.conn.apiKey ? [this.conn.apiKey] : []);
     const suffix = detail ? `: ${detail}` : "";
     if (res.status >= 300 && res.status < 400) {
@@ -85,6 +88,9 @@ export class OpenAiCompatibleClient {
     }
     if (res.status >= 500 || res.status === 408) {
       throw new ProviderError("unavailable", `Provider lỗi tạm thời (HTTP ${res.status})${suffix}`, parseRetryAfter(res.headers["retry-after"], this.now()));
+    }
+    if (withImages && (res.status === 400 || res.status === 422) && IMAGE_REJECTION.test(extractErrorMessage(res.body))) {
+      throw new ProviderError("no_image_input", `Model không nhận ảnh đầu vào; chọn model có khả năng đọc ảnh cho vai trò OCR${suffix}`);
     }
     throw new ProviderError("bad_request", `Provider từ chối yêu cầu (HTTP ${res.status})${suffix}`);
   }
@@ -129,7 +135,7 @@ export class OpenAiCompatibleClient {
       delete body.response_format;
       res = await this.send("POST", "/chat/completions", body);
     }
-    if (res.status !== 200) this.fail(res);
+    if (res.status !== 200) this.fail(res, hasImages(req.messages));
     const parsed = parseJson(res.body) as {
       choices?: Array<{ message?: { content?: unknown } }>;
       usage?: Record<string, unknown>;
@@ -143,6 +149,14 @@ export class OpenAiCompatibleClient {
     if (content === null) throw new ProviderError("invalid_response", "Phản hồi không có nội dung trả lời.");
     return { content, usage: normalizeUsage(parsed.usage), latencyMs: Math.max(0, this.now() - started) };
   }
+}
+
+/** Provider wording for "this model cannot take images" (OpenRouter, Ollama, vLLM-style servers). */
+const IMAGE_REJECTION =
+  /((not|n't|no)\s+(support|accept|allow)\w*|unsupported|no endpoints?)[^.]{0,60}(image|vision|multimodal|modalit)|(image|vision|multimodal|modalit)\w*[^.]{0,60}(not\s+(supported|allowed|accepted)|unsupported)/i;
+
+function hasImages(messages: ChatMessage[]): boolean {
+  return messages.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"));
 }
 
 function parseJson(text: string): unknown {

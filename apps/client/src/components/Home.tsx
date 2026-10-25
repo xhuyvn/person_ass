@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ScrollView, Text, TextInput, View } from "react-native";
+import { Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Link } from "expo-router";
 import type { Appointment, MemoDetail, Note, Notification, Task } from "@personalass/contracts";
 import { Screen } from "@personalass/ui";
@@ -11,13 +11,19 @@ import {
   localDateTimeToIso,
   parseDateInput,
 } from "../lib/format";
+import { precheckImages, type PickedFile } from "../lib/image-view";
 import { describeJob } from "../lib/memo-view";
+import { makeObjectUrl, revokeObjectUrl } from "../lib/object-url";
 import { Btn, Card, Check, errText, useScreenKit, type Msg } from "./kit";
+import { ImagePicker } from "./ImagePicker";
 import { MemoFeed } from "./MemoFeed";
 
 const POLL_MS = 15000;
 /** Faster refresh while a memo job is queued/running so results show up quickly. */
 const ACTIVE_POLL_MS = 3000;
+
+/** An image picked for the memo being composed; `token` is set once uploaded. */
+type Picked = PickedFile & { key: string; url: string; token?: string; error?: string };
 
 export function Home() {
   const { theme, api, s } = useScreenKit();
@@ -94,19 +100,79 @@ export function Home() {
   const [useAi, setUseAi] = useState(true);
   const [localOnly, setLocalOnly] = useState(false);
 
+  /* ---- picked images (uploaded on submit, each at most once) ---- */
+  const [picked, setPicked] = useState<Picked[]>([]);
+  const pickedRef = useRef<Picked[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  function setPickedList(list: Picked[]) {
+    pickedRef.current = list;
+    setPicked(list);
+  }
+
+  // Release preview URLs when leaving the screen.
+  useEffect(() => () => pickedRef.current.forEach((p) => revokeObjectUrl(p.url)), []);
+
+  function addFiles(files: PickedFile[]) {
+    const { accepted, errors } = precheckImages(pickedRef.current.length, files);
+    if (errors.length > 0) setMsg({ kind: "error", text: errors.join(" ") });
+    if (accepted.length === 0) return;
+    const added = accepted.map((i): Picked => {
+      const f = files[i] as PickedFile;
+      return { ...f, key: newUuid(), url: makeObjectUrl(f.blob) };
+    });
+    setPickedList([...pickedRef.current, ...added]);
+    memoRequestId.current = newUuid(); // the image set changed: not a retry of the earlier request
+  }
+
+  function removePicked(key: string) {
+    const gone = pickedRef.current.find((p) => p.key === key);
+    if (gone) revokeObjectUrl(gone.url);
+    setPickedList(pickedRef.current.filter((p) => p.key !== key));
+    memoRequestId.current = newUuid();
+  }
+
+  /** Upload images that have no token yet, one at a time; false when one failed. */
+  async function uploadPending(): Promise<boolean> {
+    for (const item of pickedRef.current) {
+      if (item.token) continue;
+      setPickedList(pickedRef.current.map((p) => (p.key === item.key ? { ...p, error: undefined } : p)));
+      try {
+        const receipt = await api.uploadAttachment(item.blob, item.name);
+        setPickedList(pickedRef.current.map((p) => (p.key === item.key ? { ...p, token: receipt.attachment_token, error: undefined } : p)));
+      } catch (e) {
+        const n = pickedRef.current.findIndex((p) => p.key === item.key) + 1;
+        setPickedList(pickedRef.current.map((p) => (p.key === item.key ? { ...p, error: errText(e) } : p)));
+        setMsg({ kind: "error", text: `Không tải được ảnh #${n}: ${errText(e)} Memo chưa được lưu; bấm Lưu memo để thử lại (ảnh đã tải xong không bị tải lại).` });
+        return false;
+      }
+    }
+    return true;
+  }
+
   async function saveMemo() {
     const text = memoText.trim();
-    if (!text) return setMsg({ kind: "error", text: "Nhập nội dung memo." });
-    const ok = await run(async () => {
-      const receipt = await api.createMemo(text, new Date().toISOString(), DEFAULT_TIMEZONE, memoRequestId.current, {
-        process: useAi,
-        privacy: localOnly ? "local_only" : "default",
-      });
-      setLastMemo({ revisionId: receipt.revision_id, text });
-    }, useAi ? "Đã lưu memo; AI đang xử lý, kết quả hiện ở mục Memo gần đây." : "Đã lưu memo.");
-    if (ok) {
-      memoRequestId.current = newUuid();
-      setMemoText("");
+    if (!text && pickedRef.current.length === 0) return setMsg({ kind: "error", text: "Nhập nội dung memo hoặc thêm ảnh." });
+    setUploading(true);
+    try {
+      if (!(await uploadPending())) return;
+      const tokens = pickedRef.current.map((p) => p.token as string);
+      const ok = await run(async () => {
+        const receipt = await api.createMemo(text, new Date().toISOString(), DEFAULT_TIMEZONE, memoRequestId.current, {
+          process: useAi,
+          privacy: localOnly ? "local_only" : "default",
+          attachmentTokens: tokens,
+        });
+        setLastMemo({ revisionId: receipt.revision_id, text });
+      }, useAi ? "Đã lưu memo; AI đang xử lý, kết quả hiện ở mục Memo gần đây." : "Đã lưu memo.");
+      if (ok) {
+        memoRequestId.current = newUuid();
+        pickedRef.current.forEach((p) => revokeObjectUrl(p.url));
+        setPickedList([]);
+        setMemoText("");
+      }
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -129,7 +195,7 @@ export function Home() {
           title,
           ...(due ? { due_date: due } : {}),
           ...(lastMemo && attach
-            ? { source: { memo_revision_id: lastMemo.revisionId, quote: lastMemo.text.slice(0, 200) } }
+            ? { source: { memo_revision_id: lastMemo.revisionId, ...(lastMemo.text ? { quote: lastMemo.text.slice(0, 200) } : {}) } }
             : {}),
         }),
       due ? "Đã tạo việc và nhắc 09:00 ngày hạn." : "Đã tạo việc (không có hạn nên không có nhắc).",
@@ -236,9 +302,31 @@ export function Home() {
             onChangeText={setMemoText}
             accessibilityLabel="Nội dung memo"
           />
+          <ImagePicker s={s} disabled={uploading} onFiles={addFiles} />
+          {picked.length > 0 ? (
+            <View style={s.actions} testID="picked-images">
+              {picked.map((p, i) => (
+                <View key={p.key} style={{ width: 104, gap: 4 }} testID="picked-image">
+                  {p.url ? (
+                    <Image source={{ uri: p.url }} accessibilityLabel={`Ảnh #${i + 1} sẽ đính kèm: ${p.name}`} style={{ width: 104, height: 104, borderRadius: 6 }} resizeMode="cover" />
+                  ) : (
+                    <Text style={s.muted}>{p.name}</Text>
+                  )}
+                  <Text style={s.muted} numberOfLines={1}>
+                    #{i + 1}
+                    {p.token ? " · đã tải" : ""}
+                  </Text>
+                  {p.error ? <Text style={s.danger}>Lỗi: {p.error}</Text> : null}
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Bỏ ảnh #${i + 1}`} disabled={uploading} onPress={() => removePicked(p.key)}>
+                    <Text style={s.link}>Bỏ ảnh</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          ) : null}
           <Check s={s} checked={useAi} onChange={setUseAi} label="Để AI tạo việc/lịch/ghi chú từ memo" />
           {useAi ? <Check s={s} checked={localOnly} onChange={setLocalOnly} label="Chỉ xử lý cục bộ (không gửi lên cloud)" /> : null}
-          <Btn s={s} label="Lưu memo" onPress={() => void saveMemo()} testID="save-memo" />
+          <Btn s={s} label={uploading ? "Đang tải ảnh / lưu…" : "Lưu memo"} disabled={uploading} onPress={() => void saveMemo()} testID="save-memo" />
           <Text style={s.muted}>
             Memo luôn được lưu nguyên văn trước. AI chỉ tự áp dụng phần rõ ràng; phần chưa chắc sẽ hỏi bạn ở mục bên dưới, và mọi thay đổi của AI đều hoàn tác được.
           </Text>

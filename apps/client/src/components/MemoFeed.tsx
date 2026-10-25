@@ -6,7 +6,10 @@ import type { Theme } from "@personalass/ui";
 import type { Api } from "../lib/api";
 import { formatInstant } from "../lib/format";
 import { answerFields, buildAnswerFields, describeAction, describeJob, describeStatus, undoGroups } from "../lib/memo-view";
+import { evidenceLabel, sourceEntity } from "../lib/image-view";
 import { Btn, Choice, Field, type Styles } from "./kit";
+import { MemoImages } from "./MemoImages";
+import { SourceView } from "./SourceView";
 
 type Run = (action: () => Promise<unknown>, okText: string) => Promise<boolean>;
 
@@ -38,7 +41,8 @@ function MemoItem({ memo, api, run, s, theme, titleOf }: { memo: MemoDetail; api
 
   return (
     <View style={s.block} testID="memo-item">
-      <Text style={s.body}>{memo.revision?.raw_text ?? ""}</Text>
+      {memo.revision?.raw_text ? <Text style={s.body}>{memo.revision.raw_text}</Text> : null}
+      <MemoImages memo={memo} api={api} run={run} s={s} theme={theme} />
       <Text style={s.muted}>
         {memo.revision ? formatInstant(memo.revision.captured_at) : ""}
         {memo.privacy === "local_only" ? " · chỉ xử lý cục bộ" : ""}
@@ -61,7 +65,19 @@ function MemoItem({ memo, api, run, s, theme, titleOf }: { memo: MemoDetail; api
         .map((a) => {
           const group = a.action_group_id && groups.has(a.action_group_id) && !shownUndo.has(a.action_group_id) ? a.action_group_id : null;
           if (group) shownUndo.add(group);
-          return <ActionRow key={a.id} a={a} title={titleOf(a.target_id)} undoGroup={group} undoCount={group ? (groups.get(group) ?? 1) : 0} api={api} run={run} s={s} />;
+          return (
+            <ActionRow
+              key={a.id}
+              a={a}
+              title={titleOf(a.target_id)}
+              fromImage={evidenceLabel(a, memo.attachments)}
+              undoGroup={group}
+              undoCount={group ? (groups.get(group) ?? 1) : 0}
+              api={api}
+              run={run}
+              s={s}
+            />
+          );
         })}
 
       {job.canReprocess && memo.job ? (
@@ -73,13 +89,18 @@ function MemoItem({ memo, api, run, s, theme, titleOf }: { memo: MemoDetail; api
   );
 }
 
-function ActionRow({ a, title, undoGroup, undoCount, api, run, s }: { a: ProposalAction; title: string | null; undoGroup: string | null; undoCount: number; api: Api; run: Run; s: Styles }) {
+function ActionRow({ a, title, fromImage, undoGroup, undoCount, api, run, s }: { a: ProposalAction; title: string | null; fromImage: string | null; undoGroup: string | null; undoCount: number; api: Api; run: Run; s: Styles }) {
   const applied = a.status === "applied" && a.reason !== "undone";
+  const source = sourceEntity(a);
   return (
     <View style={s.item} testID="memo-action">
       <View style={s.itemMain}>
         <Text style={[s.itemTitle, applied ? null : s.mutedText]}>{describeAction(a, title)}</Text>
-        <Text style={applied ? s.success : s.muted}>{describeStatus(a)}</Text>
+        <Text style={applied ? s.success : s.muted}>
+          {describeStatus(a)}
+          {fromImage ? ` · ${fromImage}` : ""}
+        </Text>
+        {source ? <SourceView type={source.type} id={source.id} api={api} s={s} /> : null}
       </View>
       {undoGroup ? (
         <Btn

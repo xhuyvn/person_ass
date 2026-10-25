@@ -156,17 +156,131 @@ export type EntityType = z.infer<typeof entityTypeSchema>;
 
 /* ---- memos ---- */
 
-export const memoCreateSchema = z.object({
-  client_request_id: uuid,
-  text: z.string().trim().min(1).max(20000),
-  captured_at: isoInstant,
-  timezone: z.string().min(1).default("Asia/Ho_Chi_Minh"),
-  /** M2: queue AI processing after the memo is durably saved. */
-  process: z.boolean().default(true),
-  /** local_only memos are never sent to a cloud connection (docs/04 §6, A20). */
-  privacy: z.enum(["default", "local_only"]).default("default"),
-});
+/** Upper bound of images per memo; the server limit (MAX_IMAGES_PER_MEMO) may be lower. */
+export const MAX_ATTACHMENTS_PER_MEMO = 10;
+
+export const memoCreateSchema = z
+  .object({
+    client_request_id: uuid,
+    /** May be empty when the memo is images only. */
+    text: z.string().trim().max(20000).default(""),
+    /** M3: tokens from POST /attachments, in display order. */
+    attachment_tokens: z.array(z.string().min(16).max(200)).max(MAX_ATTACHMENTS_PER_MEMO).default([]),
+    captured_at: isoInstant,
+    timezone: z.string().min(1).default("Asia/Ho_Chi_Minh"),
+    /** M2: queue AI processing after the memo is durably saved. */
+    process: z.boolean().default(true),
+    /** local_only memos are never sent to a cloud connection (docs/04 §6, A20). */
+    privacy: z.enum(["default", "local_only"]).default("default"),
+  })
+  .refine((v) => v.text.length > 0 || v.attachment_tokens.length > 0, {
+    message: "Nhập nội dung hoặc đính kèm ít nhất một ảnh.",
+    path: ["text"],
+  })
+  .refine((v) => new Set(v.attachment_tokens).size === v.attachment_tokens.length, {
+    message: "Ảnh bị gửi trùng.",
+    path: ["attachment_tokens"],
+  });
 export type MemoCreate = z.infer<typeof memoCreateSchema>;
+
+/* ---- attachments and OCR (M3) ---- */
+
+export const ATTACHMENT_MIMES = ["image/jpeg", "image/png", "image/webp"] as const;
+
+/** POST /attachments (multipart, field "file") → staged upload, no job yet (docs/03 §4). */
+export const attachmentUploadReceiptSchema = z.object({
+  attachment_id: uuid,
+  /** Opaque, short-lived; pass it in memo create. Never logged. */
+  attachment_token: z.string(),
+  expires_at: z.string(),
+  mime: z.enum(ATTACHMENT_MIMES),
+  bytes: z.number().int(),
+  width: z.number().int(),
+  height: z.number().int(),
+  sha256: z.string(),
+});
+export type AttachmentUploadReceipt = z.infer<typeof attachmentUploadReceiptSchema>;
+
+export const ocrBlockSchema = z.object({
+  text: z.string(),
+  kind: z.enum(["paragraph", "table", "heading", "other"]),
+  uncertain: z.boolean(),
+});
+export const ocrUncertaintySchema = z.object({
+  fragment: z.string(),
+  reason: z.string(),
+  alternatives: z.array(z.string()),
+});
+export type OcrUncertainty = z.infer<typeof ocrUncertaintySchema>;
+
+/** One immutable OCR result: from the OCR model (author ai) or a user correction (author user). */
+export const ocrRunSchema = z.object({
+  id: uuid,
+  attachment_id: uuid,
+  author: z.enum(["ai", "user"]),
+  status: z.enum(["readable", "partial", "unreadable"]),
+  text: z.string(),
+  blocks: z.array(ocrBlockSchema),
+  uncertainties: z.array(ocrUncertaintySchema),
+  model_id: z.string().nullable(),
+  supersedes_run_id: z.string().nullable(),
+  created_at: z.string(),
+});
+export type OcrRun = z.infer<typeof ocrRunSchema>;
+
+export const attachmentSchema = z.object({
+  id: uuid,
+  position: z.number().int(),
+  mime: z.enum(ATTACHMENT_MIMES),
+  bytes: z.number().int(),
+  width: z.number().int(),
+  height: z.number().int(),
+  /** Relative API path of the original image, e.g. /api/v1/attachments/<id>/content. */
+  content_path: z.string(),
+  /** Effective OCR result (newest run); null = not read yet. */
+  ocr: ocrRunSchema.nullable(),
+});
+export type Attachment = z.infer<typeof attachmentSchema>;
+
+/** POST /attachments/:id/ocr-corrections: the user's corrected text becomes a new run. */
+export const ocrCorrectionSchema = z.object({
+  text: z.string().trim().min(1).max(50000),
+  /** The run the user was looking at; 409 if a newer run exists. Null when none existed. */
+  expected_run_id: uuid.nullable(),
+  /** Queue a reprocess of the memo with the corrected text (default true). */
+  reprocess: z.boolean().default(true),
+});
+export type OcrCorrection = z.infer<typeof ocrCorrectionSchema>;
+
+export const ocrCorrectionResultSchema = z.object({
+  run: ocrRunSchema,
+  /** The reprocess job when one was queued. */
+  job: z.lazy(() => jobSchema).nullable(),
+  /**
+   * queued = a new job reads the corrected text; busy = the memo is being
+   * processed right now, reprocess later; skipped = not requested, or the
+   * image belongs to an older revision of the memo.
+   */
+  reprocess: z.enum(["queued", "busy", "skipped"]),
+});
+export type OcrCorrectionResult = z.infer<typeof ocrCorrectionResultSchema>;
+
+/** GET /sources?entity_type=&entity_id=: where an item came from, down to the OCR run it quoted. */
+export const sourceDetailSchema = z.object({
+  memo_id: z.string(),
+  memo_revision_id: z.string(),
+  quote: z.string().nullable(),
+  field_path: z.string().nullable(),
+  attachment_id: z.string().nullable(),
+  /** 0-based image position in the memo. */
+  attachment_position: z.number().int().nullable(),
+  /** The exact run quoted, even if a newer correction exists. */
+  ocr_run: ocrRunSchema.nullable(),
+  /** False when the image text was corrected after this item was created. */
+  ocr_run_is_latest: z.boolean().nullable(),
+  created_at: z.string(),
+});
+export type SourceDetail = z.infer<typeof sourceDetailSchema>;
 
 export const memoReceiptSchema = z.object({
   memo_id: uuid,
@@ -201,8 +315,13 @@ export const memoDetailSchema = z.object({
       entity_id: z.string(),
       memo_revision_id: z.string().nullable(),
       quote: z.string().nullable(),
+      /** Set when the quote comes from an image: the attachment and the exact OCR run quoted. */
+      attachment_id: z.string().nullable(),
+      ocr_run_id: z.string().nullable(),
     }),
   ),
+  /** Images of the current revision, in order (M3). */
+  attachments: z.array(z.lazy(() => attachmentSchema)),
   privacy: z.enum(["default", "local_only"]),
   /** Latest processing job of the current revision (null = never processed). */
   job: z.lazy(() => jobSchema).nullable(),
@@ -217,6 +336,8 @@ export type MemoDetail = z.infer<typeof memoDetailSchema>;
 export const sourceRefSchema = z.object({
   memo_revision_id: uuid,
   quote: z.string().max(2000).optional(),
+  /** M3: the quote comes from this OCR run of one of the revision's images. */
+  ocr_run_id: uuid.optional(),
 });
 export type SourceRef = z.infer<typeof sourceRefSchema>;
 
@@ -500,6 +621,8 @@ export const PROVIDER_ERROR_CODES = [
   "blocked_by_policy",
   "invalid_response",
   "not_configured",
+  /** The model rejected image input (text-only model bound to the OCR role). */
+  "no_image_input",
 ] as const;
 
 export const providerErrorSchema = z.object({
@@ -510,14 +633,14 @@ export type ProviderErrorDto = z.infer<typeof providerErrorSchema>;
 
 /** Test without saving anything (docs/03 §4). */
 export const aiConnectionTestSchema = z.object({
-  kind: z.enum(["metadata", "text"]),
+  kind: z.enum(["metadata", "text", "image"]),
   model_id: z.string().trim().min(1).max(200).optional(),
 });
 export type AiConnectionTest = z.infer<typeof aiConnectionTestSchema>;
 
 export const aiConnectionTestResultSchema = z.object({
   ok: z.boolean(),
-  kind: z.enum(["metadata", "text"]),
+  kind: z.enum(["metadata", "text", "image"]),
   latency_ms: z.number().int().nullable(),
   models_count: z.number().int().nullable(),
   sample: z.string().nullable(),
@@ -624,7 +747,8 @@ export const proposalActionSchema = z.object({
   status: z.enum(PROPOSAL_ACTION_STATUSES),
   reason: z.string().nullable(),
   fields: z.record(z.string(), z.unknown()),
-  evidence: z.array(z.object({ quote: z.string() })),
+  /** ocr_run_id is set when the quote was taken from an image (M3). */
+  evidence: z.array(z.object({ quote: z.string(), ocr_run_id: z.string().nullable() })),
   result_entity_type: z.string().nullable(),
   result_entity_id: z.string().nullable(),
   action_group_id: z.string().nullable(),
