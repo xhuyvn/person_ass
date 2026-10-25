@@ -28,7 +28,7 @@ const KIND_DEFAULTS: Record<AiConnectionKind, { url: string; scope: "local" | "c
 
 const ROLES: ReadonlyArray<{ value: AiRole; label: string; hint: string }> = [
   { value: "information", label: "Xử lý thông tin", hint: "Đọc memo, đề xuất việc/lịch/ghi chú." },
-  { value: "ocr", label: "OCR ảnh", hint: "Dùng từ M3; cần model đọc được ảnh." },
+  { value: "ocr", label: "Đọc chữ trong ảnh (OCR)", hint: "Phải là model đọc được ảnh (vision). Bấm “Test ảnh” ở kết nối để kiểm tra." },
   { value: "assistant", label: "Trợ lý hỏi đáp", hint: "Dùng ở bản sau." },
 ];
 
@@ -175,18 +175,22 @@ function ConnectionRow({ conn, onChanged, setMsg }: { conn: AiConnection; onChan
   const [newKey, setNewKey] = useState("");
   const [editing, setEditing] = useState(false);
 
-  async function test(kind: "metadata" | "text") {
-    if (kind === "text" && !testModel.trim()) return setResult("Nhập model id để test text.");
+  async function test(kind: "metadata" | "text" | "image") {
+    if (kind !== "metadata" && !testModel.trim()) return setResult(kind === "image" ? "Nhập model id để test ảnh." : "Nhập model id để test text.");
     setBusy(true);
     setResult("Đang kiểm tra…");
     try {
-      const r = await api.testConnection(conn.id, kind, kind === "text" ? testModel.trim() : undefined);
+      const r = await api.testConnection(conn.id, kind, kind !== "metadata" ? testModel.trim() : undefined);
       setResult(
         r.ok
           ? kind === "metadata"
             ? `OK · ${r.models_count ?? 0} model · ${r.latency_ms ?? "?"} ms`
-            : `OK · model trả lời “${r.sample ?? ""}” · ${r.latency_ms ?? "?"} ms`
-          : `Lỗi (${r.error?.code}): ${r.error?.message}`,
+            : kind === "image"
+              ? `OK · model đọc được ảnh (trả lời “${r.sample ?? ""}”) · ${r.latency_ms ?? "?"} ms`
+              : `OK · model trả lời “${r.sample ?? ""}” · ${r.latency_ms ?? "?"} ms`
+          : r.error?.code === "no_image_input"
+            ? "Model này không nhận ảnh (no_image_input). Chọn model có khả năng đọc ảnh cho vai trò OCR."
+            : `Lỗi (${r.error?.code}): ${r.error?.message}`,
       );
     } catch (e) {
       setResult(errText(e));
@@ -246,10 +250,13 @@ function ConnectionRow({ conn, onChanged, setMsg }: { conn: AiConnection; onChan
       ) : null}
       <View style={s.actions}>
         <View style={{ flex: 1, minWidth: 200 }}>
-          <Field s={s} theme={theme} label="Model để test text" value={testModel} onChangeText={setTestModel} placeholder="model id" />
+          <Field s={s} theme={theme} label="Model để test (text/ảnh)" value={testModel} onChangeText={setTestModel} placeholder="model id" />
         </View>
         <View style={{ justifyContent: "flex-end" }}>
-          <Btn s={s} secondary label="Test text" disabled={busy} onPress={() => void test("text")} />
+          <View style={s.actions}>
+            <Btn s={s} secondary label="Test text" disabled={busy} onPress={() => void test("text")} />
+            <Btn s={s} secondary label="Test ảnh" disabled={busy} onPress={() => void test("image")} testID="test-image" />
+          </View>
         </View>
       </View>
       {models && models.length > 0 ? (

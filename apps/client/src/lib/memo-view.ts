@@ -21,6 +21,15 @@ export function describeJob(job: Job | null): JobView {
         needsSettings: false,
       };
     case "waiting_configuration":
+      if (job.error_code === "no_image_input") {
+        return {
+          text: "Chờ cấu hình AI: model được gán chưa đọc được ảnh. Mở Cài đặt AI, gán model đọc ảnh cho vai trò “Đọc chữ trong ảnh (OCR)” rồi bấm “Test ảnh”. Memo đã được lưu an toàn.",
+          tone: "warn",
+          active: false,
+          canReprocess: false,
+          needsSettings: true,
+        };
+      }
       return {
         text: `Chờ cấu hình AI: ${(job.error_message ?? "chưa có kết nối/model").replace(/\.+$/, "")}. Memo đã được lưu an toàn.`,
         tone: "warn",
@@ -65,6 +74,8 @@ const REASON_LABEL: Record<string, string> = {
   undone: "đã hoàn tác",
   already_applied: "đã áp dụng ở lần xử lý trước",
   dismissed_by_user: "bạn đã bỏ qua",
+  ocr_uncertain: "chữ trong ảnh chưa chắc chắn",
+  superseded: "đã thay bằng lần xử lý mới",
 };
 
 function str(v: unknown): string | null {
